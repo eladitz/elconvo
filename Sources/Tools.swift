@@ -92,7 +92,7 @@ enum Op: String, Identifiable, CaseIterable {
         switch kind {
         case .image: ops = [.compress, .fitSize, .removeBackground, .crop, .adjust, .markup, .metadata, .readQR] + (multi ? [.collage, .toPDF] : [.toPDF])
         case .raw: ops = [.compress, .fitSize, .crop, .adjust, .metadata]
-        case .video: ops = [.compress, .fitSize, .trim, .crop, .snapshot, .faster, .slower, .mute, .metadata] + (multi ? [.join] : [])
+        case .video: ops = [.compress, .fitSize, .removeBackground, .trim, .crop, .snapshot, .faster, .slower, .mute, .metadata] + (multi ? [.join] : [])
         case .audio: ops = [.compress, .fitSize, .trim, .normalize, .mono, .stereo, .faster, .metadata] + (multi ? [.join] : [])
         case .pdf: ops = [.compress, .fitSize, .organize, .split, .rotatePages, .metadata, .readQR] + (multi ? [.merge] : [])
         default: ops = []
@@ -108,16 +108,21 @@ enum Ops {
     // MARK: Running
 
     @MainActor
-    static func run(_ op: Op, _ urls: [URL], hud: JobHUD, target: Int64? = nil) async {
-        let (outs, errors, notes) = await perform(op, urls, target: target) { name in
-            if let name { hud.current = name } else { hud.done += 1 }
+    static func run(_ op: Op, _ urls: [URL], hud: JobHUD, target: Int64? = nil, background: VideoBackground? = nil) async {
+        // Long jobs (video) report their own steps, e.g. "frame 120 of 900".
+        let step: @Sendable (String) -> Void = { text in Task { @MainActor in hud.current = text } }
+        let (outs, errors, notes) = await Converter.$report.withValue(step) {
+            await perform(op, urls, target: target, background: background) { name in
+                if let name { hud.current = name } else { hud.done += 1 }
+            }
         }
         report(op, urls, outs: outs, errors: errors, notes: notes, hud: hud)
     }
 
     /// Runs a tool over the files. `progress` gets each file name as it starts, then nil when it's done.
     @MainActor
-    static func perform(_ op: Op, _ urls: [URL], target: Int64? = nil, progress: (String?) -> Void) async -> (outs: [URL], errors: [String], notes: [String]) {
+    static func perform(_ op: Op, _ urls: [URL], target: Int64? = nil, background: VideoBackground? = nil,
+                        progress: (String?) -> Void) async -> (outs: [URL], errors: [String], notes: [String]) {
         var outs: [URL] = [], errors: [String] = [], notes: [String] = []
         if op.combines {
             progress("\(urls.count) files")
@@ -137,7 +142,9 @@ enum Ops {
                     switch op {
                     case .compress: outs.append(try await compress(url))
                     case .fitSize: outs.append(try await fitSize(url, target ?? Int64(fileSize(url) / 2)))
-                    case .removeBackground: outs.append(try await removeBackground(url))
+                    case .removeBackground:
+                        outs.append(Kind.of(url) == .video ? try await VideoMatte.run(url, background: background ?? .transparent)
+                                                           : try await removeBackground(url))
                     case .rotate: outs.append(try await rotateImage(url))
                     case .redact: outs.append(try await redact(url))
                     case .readQR: notes += try await readCodes(url)

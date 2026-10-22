@@ -1575,7 +1575,7 @@ extension AppDelegate: NSMenuDelegate {
 //
 // No arguments: the menu bar app. From the terminal:
 //   --convert <file> <format-id> [out-folder]   one conversion
-//   --tool <tool> <file>...                      a non-interactive tool
+//   --tool <tool> <file>... [--background blur|green]   a non-interactive tool
 //   --render-wheel <out.png> convert|tools <file>...   draws the wheel (for screenshots)
 
 @main
@@ -1607,9 +1607,15 @@ enum Entry {
                 print("usage: Elconvo --tool <tool> <file>...\ntools: \(tools.joined(separator: " "))")
                 exit(2)
             }
-            let urls = args[(i + 2)...].map { URL(fileURLWithPath: $0).standardizedFileURL }
+            var rest = Array(args[(i + 2)...])
+            var background: VideoBackground?
+            if let b = rest.firstIndex(of: "--background"), b + 1 < rest.count {   // video Remove BG: blur | green
+                background = ["blur": .blur, "green": .green][rest[b + 1]] ?? .transparent
+                rest.removeSubrange(b...(b + 1))
+            }
+            let urls = rest.map { URL(fileURLWithPath: $0).standardizedFileURL }
             Task { @MainActor in
-                let (outs, errors, notes) = await Ops.perform(op, urls) { _ in }
+                let (outs, errors, notes) = await Ops.perform(op, urls, background: background) { _ in }
                 outs.forEach { print($0.path) }
                 notes.forEach { print("found: \($0)") }
                 errors.forEach { FileHandle.standardError.write(Data("error: \($0)\n".utf8)) }

@@ -51,7 +51,8 @@ Elconvo lives in the menu bar and offers to start at login, so the wheel is alwa
 
 - **Compress** and **Fit Size**: shrink images, video, audio and PDFs, or aim for an exact size ("2 MB").
 - **Crop** (photos and video), **Adjust** (exposure, contrast, saturation, warmth, highlights, shadows, sharpness, vignette, rotate, flip), **Markup** (pen, arrows, boxes, text, pixelate, black-out, auto-redact faces and text).
-- **Remove background** from photos, **Read QR / barcodes**, **Make PDF** and **Collage** from images.
+- **Remove background** from photos and from **video** (people and animals): transparent `.mov`, blurred background, or green screen, with the sound kept.
+- **Read QR / barcodes**, **Make PDF** and **Collage** from images.
 - **Trim, Snapshot, Split** video and audio; **2× / ½ speed**, **Mute**, **Join**; audio **Normalize**, **Mono / Stereo**.
 - **PDF**: **Organize** pages (drag to reorder, rotate, delete), **Split**, **Rotate**, **Merge**.
 - **Metadata**: read everything (GPS location is flagged), edit title / author / copyright / description / keywords, or strip it all.
@@ -104,6 +105,7 @@ Elconvo.app/Contents/MacOS/Elconvo --tool compress video.mov
 | `Sources/Tools.swift` | The ⌥⇧ tools, crop / trim / metadata windows |
 | `Sources/Studio.swift` | Size & Info, Adjust, Markup, PDF organizer, metadata editing, 3D |
 | `Sources/PDFWord.swift` | PDF → Word that keeps headings, lists and tables |
+| `Sources/VideoMatte.swift` | Video background removal |
 | `Sources/Donate.swift` | The once-a-month "enjoying it?" note |
 
 ## Support

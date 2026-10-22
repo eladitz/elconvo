@@ -205,6 +205,9 @@ final class Shelf: ObservableObject {
             runConvert(format, urls)
         case .op(.info):
             Editors.openInfo(urls)
+        case .op(.removeBackground) where urls.contains(where: { Kind.of($0) == .video }):
+            guard let background = askVideoBackground() else { return }
+            Task { await Ops.run(.removeBackground, urls, hud: JobHUD(title: "Removing background", total: urls.count), background: background) }
         case .op(.fitSize):
             guard let target = askTargetSize(urls) else { return }
             Task { await Ops.run(.fitSize, urls, hud: JobHUD(title: "Fitting to \(bytes(target))", total: urls.count), target: target) }
@@ -212,6 +215,27 @@ final class Shelf: ObservableObject {
             if op.interactive { urls.prefix(6).forEach { Editors.open(op, $0) } }
             else { Task { await Ops.run(op, urls, hud: JobHUD(title: op.title, total: op.combines ? 1 : urls.count)) } }
         }
+    }
+
+    /// A small menu at the pointer: what should replace a video's background?
+    private func askVideoBackground() -> VideoBackground? {
+        NSApp.activate(ignoringOtherApps: true)
+        let picker = MenuPicker()
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Replace the background with:", action: nil, keyEquivalent: "").isEnabled = false
+        for (i, option) in VideoBackground.allCases.enumerated() {
+            let item = NSMenuItem(title: option.rawValue, action: #selector(MenuPicker.pick(_:)), keyEquivalent: "")
+            item.tag = i
+            item.target = picker
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)   // returns once the menu closes
+        return picker.chosen.map { VideoBackground.allCases[$0] }
+    }
+
+    final class MenuPicker: NSObject {
+        var chosen: Int?
+        @objc func pick(_ item: NSMenuItem) { chosen = item.tag }
     }
 
     private func askTargetSize(_ urls: [URL]) -> Int64? {
