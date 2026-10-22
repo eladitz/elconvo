@@ -60,10 +60,7 @@ enum PDFToWord {
 
     static func pageXML(_ page: PDFPage) async throws -> String {
         let size = displaySize(page)
-        let scale = 2400 / max(size.width, size.height)
-        let picture = page.thumbnail(of: NSSize(width: size.width * scale, height: size.height * scale), for: .cropBox)
-        var rect = CGRect(origin: .zero, size: picture.size)
-        guard let image = picture.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return "" }
+        guard let image = Converter.render(page, scale: 2400 / max(size.width, size.height), box: .cropBox) else { return "" }
         guard let container = try await recognize(image) else { return "" }
 
         let box = page.bounds(for: .cropBox)
@@ -229,7 +226,7 @@ enum PDFToWord {
     // MARK: XML
 
     static func escape(_ s: String) -> String {
-        s.replacingOccurrences(of: "[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]", with: "", options: .regularExpression)
+        s.replacingOccurrences(of: Converter.controlCharacters, with: "", options: .regularExpression)
             .replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")
     }
@@ -312,14 +309,8 @@ enum PDFToWord {
     static let margin = 1080   // ¾ inch, in twips
 
     static func write(body: String, pageSize: CGSize, to out: URL) throws {
-        let fm = FileManager.default
-        let stage = fm.temporaryDirectory.appendingPathComponent("elconvo-docx-\(UUID().uuidString)")
-        defer { try? fm.removeItem(at: stage) }
-        for dir in ["_rels", "word/_rels"] {
-            try fm.createDirectory(at: stage.appendingPathComponent(dir), withIntermediateDirectories: true)
-        }
         let w = Int(pageSize.width * 20), h = Int(pageSize.height * 20)
-        let files: [String: String] = [
+        try Converter.writeZip([
             "[Content_Types].xml": """
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>
@@ -337,11 +328,7 @@ enum PDFToWord {
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>\(body)<w:sectPr><w:pgSz w:w="\(w)" w:h="\(h)"\(w > h ? " w:orient=\"landscape\"" : "")/><w:pgMar w:top="\(margin)" w:right="\(margin)" w:bottom="\(margin)" w:left="\(margin)" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr></w:body></w:document>
             """,
-        ]
-        for (path, text) in files { try text.write(to: stage.appendingPathComponent(path), atomically: true, encoding: .utf8) }
-        try? fm.removeItem(at: out)
-        try Converter.runSync("/usr/bin/tar", ["-c", "-f", out.path, "--format", "zip", "-C", stage.path,
-                                               "[Content_Types].xml", "_rels", "word"], env: ["COPYFILE_DISABLE": "1"])
+        ], to: out)
     }
 
     static let styles = """

@@ -36,7 +36,7 @@ struct SizeItem: Identifiable {
             return item
         }
         let walker = FileManager.default.enumerator(at: url, includingPropertiesForKeys: Array(keys), options: [], errorHandler: { _, _ in true })
-        while let f = walker?.nextObject() as? URL {
+        while let f = walker?.nextObject() as? URL, !Task.isCancelled {   // a newer drag cancels this walk
             guard let v = try? f.resourceValues(forKeys: keys) else { continue }
             if v.isDirectory == true { item.folders += 1; continue }
             item.files += 1
@@ -47,7 +47,6 @@ struct SizeItem: Identifiable {
     }
 }
 
-func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
 
 enum Checksums {
     private static let crcTable: [UInt32] = (0..<256).map { i in
@@ -202,7 +201,7 @@ final class AdjustModel: ObservableObject {
     private var full: CGImage?
     private var props: [CFString: Any] = [:]
     private var previewBase: CIImage?
-    private let context = CIContext()
+    private let context = Converter.ciContext
     weak var window: NSWindow?
 
     @Published var preview: CGImage?
@@ -265,9 +264,7 @@ final class AdjustModel: ObservableObject {
         do {
             let target = Ops.editedURL(url, "adjusted")
             try Ops.save(cg, to: target, props: Ops.keptMetadata(props))
-            Donation.recordUse()
-            NSWorkspace.shared.activateFileViewerSelecting([target])
-            window?.close()
+            Ops.delivered([target], closing: window)
         } catch { self.error = error.localizedDescription }
     }
 }
@@ -386,11 +383,7 @@ final class MarkupModel: ObservableObject {
     /// Adds black boxes over every face, line of text and barcode Vision finds.
     func autoRedact() {
         guard let image else { return }
-        let text = VNRecognizeTextRequest()
-        let faces = VNDetectFaceRectanglesRequest()
-        let codes = VNDetectBarcodesRequest()
-        try? VNImageRequestHandler(cgImage: image).perform([text, faces, codes])
-        let boxes = (text.results ?? []).map(\.boundingBox) + (faces.results ?? []).map(\.boundingBox) + (codes.results ?? []).map(\.boundingBox)
+        let boxes = (try? Ops.sensitiveAreas(in: image)) ?? []
         if boxes.isEmpty { error = "Found no text, faces or codes."; return }
         for b in boxes {
             let pad = b.height * 0.15
@@ -412,7 +405,7 @@ final class MarkupModel: ObservableObject {
         if !blurs.isEmpty {
             let ci = CIImage(cgImage: image).clampedToExtent()
                 .applyingFilter("CIPixellate", parameters: [kCIInputScaleKey: max(8, w / 60)]).cropped(to: CGRect(x: 0, y: 0, width: w, height: h))
-            if let mosaic = CIContext().createCGImage(ci, from: ci.extent) {
+            if let mosaic = Converter.ciContext.createCGImage(ci, from: ci.extent) {
                 for m in blurs {
                     let r = rect(m, w, h)
                     ctx.saveGState()
@@ -465,9 +458,7 @@ final class MarkupModel: ObservableObject {
         do {
             let out = Ops.editedURL(url, "markup")
             try Ops.save(result, to: out)
-            Donation.recordUse()
-            NSWorkspace.shared.activateFileViewerSelecting([out])
-            window?.close()
+            Ops.delivered([out], closing: window)
         } catch { self.error = error.localizedDescription }
     }
 
@@ -545,12 +536,8 @@ struct MarkupView: View {
     }
 
     func canvas(_ image: CGImage, size: CGSize) -> some View {
-        let iw = CGFloat(image.width), ih = CGFloat(image.height)
-        let scale = min((size.width - 40) / iw, (size.height - 40) / ih)
-        let fit = CGRect(x: (size.width - iw * scale) / 2, y: (size.height - ih * scale) / 2, width: iw * scale, height: ih * scale)
-        func norm(_ p: CGPoint) -> CGPoint {
-            CGPoint(x: min(max((p.x - fit.minX) / fit.width, 0), 1), y: min(max((p.y - fit.minY) / fit.height, 0), 1))
-        }
+        let fit = CGRect.fitting(image, in: size)
+        let norm = fit.normalised
         let all = model.marks + (drawing.mark.map { [$0] } ?? [])
         return ZStack(alignment: .topLeading) {
             Image(decorative: image, scale: 1).resizable().frame(width: fit.width, height: fit.height).position(x: fit.midX, y: fit.midY)
@@ -631,9 +618,11 @@ final class OrganizeModel: ObservableObject {
         guard let doc = PDFDocument(url: url) else { error = "Couldn't open the PDF."; return }
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i)?.copy() as? PDFPage else { continue }
-            pages.append(Page(page: page, thumb: page.thumbnail(of: NSSize(width: 240, height: 320), for: .mediaBox)))
+            pages.append(Page(page: page, thumb: Self.thumb(page)))
         }
     }
+
+    static func thumb(_ page: PDFPage) -> NSImage { page.thumbnail(of: NSSize(width: 240, height: 320), for: .mediaBox) }
 
     func move(_ id: UUID, by offset: Int) {
         guard let i = pages.firstIndex(where: { $0.id == id }) else { return }
@@ -650,7 +639,7 @@ final class OrganizeModel: ObservableObject {
     func rotate(_ id: UUID) {
         guard let i = pages.firstIndex(where: { $0.id == id }) else { return }
         pages[i].page.rotation += 90
-        pages[i].thumb = pages[i].page.thumbnail(of: NSSize(width: 240, height: 320), for: .mediaBox)
+        pages[i].thumb = Self.thumb(pages[i].page)
     }
 
     func delete(_ id: UUID) { pages.removeAll { $0.id == id } }
@@ -660,9 +649,7 @@ final class OrganizeModel: ObservableObject {
         for p in pages { doc.insert(p.page, at: doc.pageCount) }
         let out = Ops.sibling(url, "organized")
         guard doc.write(to: out) else { error = "Couldn't write the PDF."; return }
-        Donation.recordUse()
-        NSWorkspace.shared.activateFileViewerSelecting([out])
-        window?.close()
+        Ops.delivered([out], closing: window)
     }
 }
 
@@ -737,7 +724,7 @@ extension Ops {
         case .video, .audio:
             let items = (try? await AVURLAsset(url: url).load(.commonMetadata)) ?? []
             func value(_ ids: [AVMetadataIdentifier]) async -> String {
-                for item in AVMetadataItem.metadataItems(from: items, filteredByIdentifier: ids[0]) + ids.dropFirst().flatMap({ AVMetadataItem.metadataItems(from: items, filteredByIdentifier: $0) }) {
+                for item in ids.flatMap({ AVMetadataItem.metadataItems(from: items, filteredByIdentifier: $0) }) {
                     if let s = try? await item.load(.stringValue) { return s }
                 }
                 return ""
@@ -785,7 +772,7 @@ extension Ops {
                 throw ConvertError("This image format can't take new metadata without re-encoding.")
             }
         case .video, .audio:
-            guard ["mov", "mp4", "m4v", "m4a"].contains(url.pathExtension.lowercased()) else {
+            guard Ops.taggableExtensions.contains(url.pathExtension.lowercased()) else {
                 throw ConvertError("Convert to MP4/MOV/M4A first to edit its tags.")
             }
             let asset = AVURLAsset(url: url)
@@ -974,6 +961,7 @@ enum Models3D {
     static func writePLY(_ tris: [Triangle], to out: URL) throws {
         let (vertices, faces) = indexed(tris)
         var s = "ply\nformat ascii 1.0\ncomment Exported by Elconvo\nelement vertex \(vertices.count)\nproperty float x\nproperty float y\nproperty float z\nelement face \(faces.count)\nproperty list uchar int vertex_indices\nend_header\n"
+        s.reserveCapacity(vertices.count * 32 + faces.count * 24)
         for v in vertices { s += "\(v.x) \(v.y) \(v.z)\n" }
         for f in faces { s += "3 \(f.0) \(f.1) \(f.2)\n" }
         try s.write(to: out, atomically: true, encoding: .utf8)
@@ -981,27 +969,23 @@ enum Models3D {
 
     static func write3MF(_ tris: [Triangle], to out: URL) throws {
         let (vertices, faces) = indexed(tris)
-        let fm = FileManager.default
-        let stage = fm.temporaryDirectory.appendingPathComponent("elconvo-3mf-\(UUID().uuidString)")
-        defer { try? fm.removeItem(at: stage) }
-        try fm.createDirectory(at: stage.appendingPathComponent("_rels"), withIntermediateDirectories: true)
-        try fm.createDirectory(at: stage.appendingPathComponent("3D"), withIntermediateDirectories: true)
-        try """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>
-        """.write(to: stage.appendingPathComponent("[Content_Types].xml"), atomically: true, encoding: .utf8)
-        try """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>
-        """.write(to: stage.appendingPathComponent("_rels/.rels"), atomically: true, encoding: .utf8)
         var model = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model unit=\"millimeter\" xml:lang=\"en-US\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">\n<resources><object id=\"1\" type=\"model\"><mesh><vertices>\n"
+        model.reserveCapacity(vertices.count * 48 + faces.count * 40)
         for v in vertices { model += "<vertex x=\"\(v.x)\" y=\"\(v.y)\" z=\"\(v.z)\"/>\n" }
         model += "</vertices><triangles>\n"
         for f in faces { model += "<triangle v1=\"\(f.0)\" v2=\"\(f.1)\" v3=\"\(f.2)\"/>\n" }
         model += "</triangles></mesh></object></resources>\n<build><item objectid=\"1\"/></build>\n</model>\n"
-        try model.write(to: stage.appendingPathComponent("3D/3dmodel.model"), atomically: true, encoding: .utf8)
-        try Converter.runSync("/usr/bin/tar", ["-c", "-f", out.path, "--format", "zip", "-C", stage.path,
-                                               "[Content_Types].xml", "_rels", "3D"], env: ["COPYFILE_DISABLE": "1"])
+        try Converter.writeZip([
+            "[Content_Types].xml": """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/></Types>
+            """,
+            "_rels/.rels": """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>
+            """,
+            "3D/3dmodel.model": model,
+        ], to: out)
     }
 
     /// USDA through Model I/O; USDZ through SceneKit, since Model I/O can't package it.

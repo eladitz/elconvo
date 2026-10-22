@@ -49,11 +49,20 @@ enum Kind: String, CaseIterable {
     ]
 }
 
+extension NSPasteboard {
+    var fileURLs: [URL] { readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? [] }
+}
+
+func bytes(_ n: Int64) -> String { ByteCountFormatter.string(fromByteCount: n, countStyle: .file) }
+
 struct Format: Hashable, Identifiable {
     let id: String      // unique key, e.g. "m4a-alac"
     let ext: String     // output file extension
     let label: String
     var needs: Tool? = nil
+
+    /// The label for menus, saying what's missing when the format can't be produced yet.
+    var menuLabel: String { label + (Tools.has(needs) ? "" : " — needs \(needs!.rawValue)") }
 }
 
 enum Tool: String { case magick = "ImageMagick", ffmpeg = "ffmpeg", dng = "Adobe DNG Converter" }
@@ -194,10 +203,8 @@ enum Formats {
     static func outputs(for kind: Kind) -> [Format] { conversions(for: kind) + archiving(for: kind) }
 
     static func archiving(for kind: Kind) -> [Format] {
-        switch kind {
-        case .archive: return archiveOut.map { Format(id: $0.id, ext: $0.ext, label: "Repack as " + $0.label) }
-        default: return archiveOut.map { Format(id: $0.id, ext: $0.ext, label: "Compress to " + $0.label) }
-        }
+        let verb = kind == .archive ? "Repack as " : "Compress to "
+        return archiveOut.map { Format(id: $0.id, ext: $0.ext, label: verb + $0.label) }
     }
 
     static func conversions(for kind: Kind) -> [Format] {
@@ -254,14 +261,13 @@ enum Formats {
     }
 
     /// Compact name for a wheel petal.
-    static func short(_ f: Format) -> String {
-        let names = ["img-pdf": "PDF", "tiff16": "TIFF 16", "png16": "PNG 16", "m4a-aac": "M4A", "m4a-alac": "ALAC",
+    static func short(_ f: Format) -> String { shortNames[f.id] ?? f.ext.uppercased() }
+
+    private static let shortNames = ["img-pdf": "PDF", "tiff16": "TIFF 16", "png16": "PNG 16", "m4a-aac": "M4A", "m4a-alac": "ALAC",
                      "mov-hevc": "MOV HEVC", "vid-gif": "GIF", "audio-m4a-aac": "M4A Audio", "audio-mp3": "MP3 Audio",
                      "doc-pdf": "PDF", "pdf-png": "PNG", "pdf-jpg": "JPG", "pdf-tiff": "TIFF", "pdf-txt": "TXT",
                      "pdf-rtf": "RTF", "pdf-docx": "DOCX", "extract": "Extract", "tgz": "TAR.GZ", "txz": "TAR.XZ", "tbz": "TAR.BZ2", "m4r": "Ringtone",
                      "sub-txt": "TXT", "bplist": "PLIST"]
-        return names[f.id] ?? f.ext.uppercased()
-    }
 
     static func byID(_ id: String) -> Format? {
         Kind.allCases.lazy.flatMap { conversions(for: $0) }.first { $0.id == id }
@@ -300,6 +306,44 @@ struct ConvertError: LocalizedError {
 enum Converter {
     /// Long jobs report steps ("Page 3 of 8") here; the progress window sets it for the task it runs.
     @TaskLocal static var report: (@Sendable (String) -> Void)?
+
+    /// Core Image contexts are costly to make (GPU setup), so every render shares these.
+    static let ciContext = CIContext()
+    static let rawContext = CIContext(options: [.workingFormat: CIFormat.RGBAh])
+
+    /// Characters PDF text can carry that are illegal in DOCX/ODT XML.
+    static let controlCharacters = "[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]"
+
+    /// Writes text parts (path → contents) into a zip: the container DOCX and 3MF both use.
+    static func writeZip(_ parts: [String: String], to out: URL) throws {
+        let fm = FileManager.default
+        let stage = fm.temporaryDirectory.appendingPathComponent("elconvo-zip-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: stage) }
+        for (path, text) in parts {
+            let file = stage.appendingPathComponent(path)
+            try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: file, atomically: true, encoding: .utf8)
+        }
+        let top = Set(parts.keys.map { String($0.split(separator: "/")[0]) }).sorted()
+        try? fm.removeItem(at: out)
+        try runSync("/usr/bin/tar", ["-c", "-f", out.path, "--format", "zip", "-C", stage.path] + top, env: ["COPYFILE_DISABLE": "1"])
+    }
+
+    /// A temporary file, deleted when `body` returns.
+    static func withTempFile<T>(ext: String, _ body: (URL) throws -> T) rethrows -> T {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
+        defer { try? FileManager.default.removeItem(at: url) }
+        return try body(url)
+    }
+
+    /// A PDF page as a bitmap, `scale` pixels per point, upright.
+    static func render(_ page: PDFPage, scale: CGFloat, box: PDFDisplayBox = .mediaBox) -> CGImage? {
+        var size = page.bounds(for: box).size
+        if page.rotation % 180 != 0 { size = CGSize(width: size.height, height: size.width) }
+        let picture = page.thumbnail(of: NSSize(width: size.width * scale, height: size.height * scale), for: box)
+        var rect = CGRect(origin: .zero, size: picture.size)
+        return picture.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
 
     /// Converts one file and returns the written file (or folder, for multi-page output).
     static func convert(_ input: URL, to format: Format, options: Options) async throws -> URL {
@@ -380,7 +424,7 @@ enum Converter {
         let props = source.flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] } ?? [:]
 
         if raw, let filter = CIRAWFilter(imageURL: url), let ci = filter.outputImage {
-            let ctx = CIContext(options: [.workingFormat: CIFormat.RGBAh])
+            let ctx = rawContext
             let format: CIFormat = sixteenBit ? .RGBA16 : .RGBA8
             let space = CGColorSpace(name: sixteenBit ? CGColorSpace.displayP3 : CGColorSpace.sRGB)!
             if let cg = ctx.createCGImage(ci, from: ci.extent, format: format, colorSpace: space) {
@@ -402,21 +446,23 @@ enum Converter {
     static func image(_ input: URL, to out: URL, format: Format, options: Options, raw: Bool) throws {
         if ["webp", "hdr", "eps", "wbmp", "svg"].contains(format.id) {
             // ImageIO can't write these: make a PNG first, then hand it to ImageMagick or wrap it in SVG.
-            let png = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
-            defer { try? FileManager.default.removeItem(at: png) }
-            try image(input, to: png, format: Formats.byID("png")!, options: options, raw: raw)
-            if format.id == "svg" {
-                // A real SVG file that browsers and design apps open, holding the picture (not traced vectors).
-                let data = try Data(contentsOf: png)
-                guard let rep = NSBitmapImageRep(data: data) else { throw ConvertError("Couldn't read the image.") }
-                let (w, h) = (rep.pixelsWide, rep.pixelsHigh)
-                try """
-                <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="\(w)" height="\(h)" viewBox="0 0 \(w) \(h)">
-                <image width="\(w)" height="\(h)" xlink:href="data:image/png;base64,\(data.base64EncodedString())"/>
-                </svg>
-                """.write(to: out, atomically: true, encoding: .utf8)
-            } else {
-                try runSync(Tools.magick!, [png.path, "-quality", "\(Int(options.quality.lossy * 100))", out.path])
+            try withTempFile(ext: "png") { png in
+                try image(input, to: png, format: Formats.byID("png")!, options: options, raw: raw)
+                if format.id == "svg" {
+                    // A real SVG file that browsers and design apps open, holding the picture (not traced vectors).
+                    let data = try Data(contentsOf: png)
+                    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+                          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                          let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int
+                    else { throw ConvertError("Couldn't read the image.") }
+                    try """
+                    <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="\(w)" height="\(h)" viewBox="0 0 \(w) \(h)">
+                    <image width="\(w)" height="\(h)" xlink:href="data:image/png;base64,\(data.base64EncodedString())"/>
+                    </svg>
+                    """.write(to: out, atomically: true, encoding: .utf8)
+                } else {
+                    try runSync(Tools.magick!, [png.path, "-quality", "\(Int(options.quality.lossy * 100))", out.path])
+                }
             }
             return
         }
@@ -442,12 +488,7 @@ enum Converter {
         else { throw ConvertError("This Mac can't write \(format.label).") }
 
         var destProps: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: options.quality.lossy]
-        if !options.stripMetadata {
-            for key in [kCGImagePropertyExifDictionary, kCGImagePropertyGPSDictionary, kCGImagePropertyIPTCDictionary,
-                        kCGImagePropertyTIFFDictionary, kCGImagePropertyExifAuxDictionary] {
-                if let value = props[key] { destProps[key] = value }
-            }
-        }
+        if !options.stripMetadata { destProps.merge(Ops.keptMetadata(props)) { $1 } }
         destProps[kCGImagePropertyOrientation] = 1   // pixels are already upright
         CGImageDestinationAddImage(dest, cg, destProps as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { throw ConvertError("Couldn't write \(format.label).") }
@@ -458,7 +499,7 @@ enum Converter {
         guard !alreadyApplied, let raw = props[kCGImagePropertyOrientation] as? UInt32, raw != 1,
               let orientation = CGImagePropertyOrientation(rawValue: raw) else { return image }
         let ci = CIImage(cgImage: image).oriented(orientation)
-        return CIContext().createCGImage(ci, from: ci.extent) ?? image
+        return ciContext.createCGImage(ci, from: ci.extent) ?? image
     }
 
     static func resized(_ image: CGImage, maxSide: Int) -> CGImage {
@@ -759,7 +800,7 @@ enum Converter {
         }
         // PDF text can carry control characters (form feeds etc.) that are illegal in DOCX/ODT XML
         // and make Word or Pages open an empty document.
-        combined.mutableString.replaceOccurrences(of: "[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F]", with: "",
+        combined.mutableString.replaceOccurrences(of: controlCharacters, with: "",
                                                   options: .regularExpression, range: NSRange(location: 0, length: combined.length))
         guard !combined.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ConvertError("Couldn't find any text in this PDF.")
@@ -772,10 +813,7 @@ enum Converter {
     }
 
     static func ocr(_ page: PDFPage) -> String {
-        let size = page.bounds(for: .mediaBox).size
-        let picture = page.thumbnail(of: NSSize(width: size.width * 3, height: size.height * 3), for: .mediaBox)
-        var rect = CGRect(origin: .zero, size: picture.size)
-        guard let cg = picture.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return "" }
+        guard let cg = render(page, scale: 3) else { return "" }
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = true
@@ -975,7 +1013,6 @@ enum Converter {
             target = uniqueURL(in: parent, base: base, ext: "")
         }
         try fm.moveItem(at: source, to: target)
-        if source == staging { try fm.createDirectory(at: staging, withIntermediateDirectories: true) } // for the defer
         return target
     }
 
@@ -1064,7 +1101,7 @@ final class Job: ObservableObject, Identifiable {
     init(url: URL) {
         self.url = url
         kind = Kind.of(url)
-        size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+        size = Int64(Ops.fileSize(url))
         format = Formats.defaultOutput(for: kind, ext: url.pathExtension.lowercased())
     }
 }
@@ -1224,7 +1261,7 @@ struct ContentView: View {
     }
 
     func formatButton(_ kind: Kind, _ f: Format) -> some View {
-        Button(f.label + (Tools.has(f.needs) ? "" : " (needs \(f.needs!.rawValue))")) { store.setAll(kind, to: f) }
+        Button(f.menuLabel) { store.setAll(kind, to: f) }
             .disabled(!Tools.has(f.needs))
     }
 
@@ -1340,15 +1377,16 @@ struct JobRow: View {
             Image(nsImage: NSWorkspace.shared.icon(forFile: job.url.path)).resizable().frame(width: 32, height: 32)
             VStack(alignment: .leading, spacing: 2) {
                 Text(job.url.lastPathComponent).lineLimit(1).truncationMode(.middle)
-                Text(job.kind == .folder ? "Folder" : "\(job.kind.rawValue) · \(ByteCountFormatter.string(fromByteCount: job.size, countStyle: .file))")
+                Text(job.kind == .folder ? "Folder" : "\(job.kind.rawValue) · \(bytes(job.size))")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 12)
             Image(systemName: "arrow.right").foregroundStyle(.tertiary)
             Picker("", selection: Binding(get: { job.format }, set: { job.format = $0; job.state = .ready })) {
                 if job.format == nil { Text("Choose…").tag(Format?.none) }
-                ForEach(Formats.conversions(for: job.kind)) { option($0) }
-                if !Formats.conversions(for: job.kind).isEmpty { Divider() }
+                let conversions = Formats.conversions(for: job.kind)
+                ForEach(conversions) { option($0) }
+                if !conversions.isEmpty { Divider() }
                 ForEach(Formats.archiving(for: job.kind)) { option($0) }
             }
             .labelsHidden().frame(width: 210)
@@ -1370,7 +1408,7 @@ struct JobRow: View {
     }
 
     func option(_ f: Format) -> some View {
-        Text(f.label + (Tools.has(f.needs) ? "" : " — needs \(f.needs!.rawValue)"))
+        Text(f.menuLabel)
             .tag(Optional(f))
             .selectionDisabled(!Tools.has(f.needs))
     }
@@ -1415,6 +1453,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         Shelf.shared.start()
+        // Spawning ffmpeg to list its encoders takes a moment; do it now rather than inside the first OGG job.
+        DispatchQueue.global(qos: .utility).async { _ = Tools.ffmpegEncoders }
         Donation.start()
         offerLoginItemOnce()
         // No window on launch: everything happens from the drag wheel.
@@ -1457,13 +1497,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Finder ▸ right-click ▸ Services (declared under NSServices in Info.plist).
     @objc func showSizeInfo(_ pboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
-        let urls = pboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        let urls = pboard.fileURLs
         if !urls.isEmpty { Editors.openInfo(urls) }
     }
 
     @objc func showMetadata(_ pboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
-        let urls = pboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-        urls.prefix(6).forEach { Editors.open(.metadata, $0) }
+        pboard.fileURLs.prefix(6).forEach { Editors.open(.metadata, $0) }
     }
 
     @objc func openWindow() { showMainWindow() }
@@ -1532,7 +1571,12 @@ extension AppDelegate: NSMenuDelegate {
     }
 }
 
-// MARK: - Entry point (GUI, or `--convert <file> <format-id> [out-folder]` from the terminal)
+// MARK: - Entry point
+//
+// No arguments: the menu bar app. From the terminal:
+//   --convert <file> <format-id> [out-folder]   one conversion
+//   --tool <tool> <file>...                      a non-interactive tool
+//   --render-wheel <out.png> convert|tools <file>...   draws the wheel (for screenshots)
 
 @main
 enum Entry {
@@ -1559,7 +1603,8 @@ enum Entry {
         }
         if let i = args.firstIndex(of: "--tool") {
             guard args.count > i + 2, let op = Op(rawValue: args[i + 1]) else {
-                print("usage: Elconvo --tool <tool> <file>...\ntools: compress removeBackground rotate redact readQR collage toPDF faster slower mute join normalize mono stereo merge split rotatePages")
+                let tools = Op.allCases.filter { !$0.interactive }.map(\.rawValue)
+                print("usage: Elconvo --tool <tool> <file>...\ntools: \(tools.joined(separator: " "))")
                 exit(2)
             }
             let urls = args[(i + 2)...].map { URL(fileURLWithPath: $0).standardizedFileURL }

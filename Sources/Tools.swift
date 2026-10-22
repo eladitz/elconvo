@@ -1,5 +1,6 @@
-// Tools for the Option+Shift wheel: compress, background removal, redaction, crop, trim, speed,
+// Tools for the Option+Shift wheel: compress, fit to size, background removal, crop, trim, speed,
 // normalise, PDF merge/split and friends. Each writes a new file beside the original.
+// (rotate and redact are reachable from the command line; in the app they live in Adjust and Markup.)
 
 import SwiftUI
 import AppKit
@@ -10,7 +11,7 @@ import PDFKit
 import Accelerate
 import CoreImage
 
-enum Op: String, Identifiable {
+enum Op: String, Identifiable, CaseIterable {
     case compress, fitSize, removeBackground, crop, adjust, markup, rotate, redact, metadata, readQR, collage, toPDF
     case trim, snapshot, faster, slower, mute, join
     case normalize, mono, stereo
@@ -171,13 +172,21 @@ enum Ops {
         } else if op == .compress || op == .fitSize, !outs.isEmpty {
             let before = urls.reduce(0) { $0 + fileSize($1) }, after = outs.reduce(0) { $0 + fileSize($1) }
             let saved = before > 0 ? Int((1 - Double(after) / Double(before)) * 100) : 0
-            hud.title = "Compressed \(ByteCountFormatter.string(fromByteCount: Int64(before), countStyle: .file)) → "
-                + "\(ByteCountFormatter.string(fromByteCount: Int64(after), countStyle: .file)) (−\(saved)%)"
+            hud.title = "Compressed \(bytes(Int64(before))) → \(bytes(Int64(after))) (−\(saved)%)"
         }
         hud.finish(outs: outs, errors: errors, note: note)
     }
 
     // MARK: Helpers
+
+    /// Every finished job ends the same way: it counts toward the donation prompt, Finder shows
+    /// the result, and the editor that made it (if any) closes.
+    @MainActor
+    static func delivered(_ outs: [URL], closing window: NSWindow? = nil) {
+        outs.forEach { _ in Donation.recordUse() }
+        if !outs.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(outs) }
+        window?.close()
+    }
 
     static func fileSize(_ url: URL) -> Int { (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
 
@@ -208,10 +217,10 @@ enum Ops {
         if ext == "jpeg" { ext = "jpg" }
         if ext == "tif" { ext = "tiff" }
         if ext == "webp", let magick = Tools.magick {
-            let png = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
-            defer { try? FileManager.default.removeItem(at: png) }
-            try save(image, to: png)
-            try Converter.runSync(magick, [png.path, "-quality", "\(Int(quality * 100))", out.path])
+            try Converter.withTempFile(ext: "png") { png in
+                try save(image, to: png)
+                try Converter.runSync(magick, [png.path, "-quality", "\(Int(quality * 100))", out.path])
+            }
             return
         }
         let flat = ext == "jpg" || ext == "bmp" ? Converter.flattened(image) : image
@@ -225,13 +234,21 @@ enum Ops {
         guard CGImageDestinationFinalize(dest) else { throw ConvertError("Couldn't save the image.") }
     }
 
+    /// The camera, location, caption and copyright blocks worth carrying into a converted image.
     static func keptMetadata(_ props: [CFString: Any]) -> [CFString: Any] {
-        var kept: [CFString: Any] = [:]
-        for key in [kCGImagePropertyExifDictionary, kCGImagePropertyGPSDictionary, kCGImagePropertyIPTCDictionary,
-                    kCGImagePropertyTIFFDictionary] {
-            if let value = props[key] { kept[key] = value }
-        }
-        return kept
+        let keys = [kCGImagePropertyExifDictionary, kCGImagePropertyGPSDictionary, kCGImagePropertyIPTCDictionary,
+                    kCGImagePropertyTIFFDictionary, kCGImagePropertyExifAuxDictionary]
+        return props.filter { keys.contains($0.key) }
+    }
+
+    /// Apple's own movie containers, which AVFoundation writes directly.
+    static let movieExtensions: Set<String> = ["mov", "mp4", "m4v"]
+    /// The ones AVFoundation can rewrite with new or no metadata.
+    static let taggableExtensions = movieExtensions.union(["m4a"])
+
+    /// Keep the original's container when AVFoundation can write it, otherwise use `fallback`.
+    static func movieExtension(_ url: URL, else fallback: String) -> String {
+        movieExtensions.contains(url.pathExtension.lowercased()) ? url.pathExtension : fallback
     }
 
     static func fileType(for url: URL) -> AVFileType {
@@ -318,15 +335,15 @@ enum Ops {
             out = sibling(url, "compressed", ext: outExt)
             if outExt == "png", let magick = Tools.magick {
                 // 256-colour quantisation is where PNG savings come from.
-                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
-                defer { try? FileManager.default.removeItem(at: tmp) }
-                try save(small, to: tmp)
-                try Converter.runSync(magick, [tmp.path, "-strip", "-colors", "256", "-define", "png:compression-level=9", out.path])
+                try Converter.withTempFile(ext: "png") { tmp in
+                    try save(small, to: tmp)
+                    try Converter.runSync(magick, [tmp.path, "-strip", "-colors", "256", "-define", "png:compression-level=9", out.path])
+                }
             } else {
                 try save(small, to: out, quality: 0.6, props: keptMetadata(props))
             }
         case .video:
-            let ext = ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased()) ? url.pathExtension : "mp4"
+            let ext = movieExtension(url, else: "mp4")
             out = sibling(url, "compressed", ext: ext)
             try await Converter.run("/usr/bin/avconvert", ["--source", url.path, "--output", out.path,
                                                            "--preset", "PresetHEVC1920x1080", "--replace"])
@@ -369,7 +386,7 @@ enum Ops {
 
     /// Makes a copy at or just under `target` bytes.
     static func fitSize(_ url: URL, _ target: Int64) async throws -> URL {
-        let mb = ByteCountFormatter.string(fromByteCount: target, countStyle: .file)
+        let mb = bytes(target)
         if Int64(fileSize(url)) <= target { throw ConvertError("Already under \(mb).") }
         switch Kind.of(url) {
         case .image, .raw:
@@ -459,7 +476,7 @@ enum Ops {
         }
         let buffer = try result.generateMaskedImage(ofInstances: result.allInstances, from: handler, croppedToInstancesExtent: false)
         let ci = CIImage(cvPixelBuffer: buffer)
-        guard let cut = CIContext().createCGImage(ci, from: ci.extent) else { throw ConvertError("Couldn't build the cut-out.") }
+        guard let cut = Converter.ciContext.createCGImage(ci, from: ci.extent) else { throw ConvertError("Couldn't build the cut-out.") }
         let out = editedURL(url, "no background", transparent: true)
         try save(cut, to: out)
         return out
@@ -468,21 +485,26 @@ enum Ops {
     static func rotateImage(_ url: URL) async throws -> URL {
         let (image, props) = try loadUpright(url)
         let ci = CIImage(cgImage: image).oriented(.right)
-        guard let rotated = CIContext().createCGImage(ci, from: ci.extent) else { throw ConvertError("Couldn't rotate.") }
+        guard let rotated = Converter.ciContext.createCGImage(ci, from: ci.extent) else { throw ConvertError("Couldn't rotate.") }
         let out = editedURL(url, "rotated")
         try save(rotated, to: out, props: keptMetadata(props))
         return out
     }
 
     /// Blacks out every face, line of text and barcode Vision can find. Metadata is dropped too.
-    static func redact(_ url: URL) async throws -> URL {
-        let (image, _) = try loadUpright(url)
+    /// Every line of text, face and barcode Vision finds: normalised boxes, bottom-left origin.
+    static func sensitiveAreas(in image: CGImage) throws -> [CGRect] {
         let text = VNRecognizeTextRequest()
         text.recognitionLevel = .accurate
         let faces = VNDetectFaceRectanglesRequest()
         let codes = VNDetectBarcodesRequest()
         try VNImageRequestHandler(cgImage: image).perform([text, faces, codes])
-        let boxes = (text.results ?? []).map(\.boundingBox) + (faces.results ?? []).map(\.boundingBox) + (codes.results ?? []).map(\.boundingBox)
+        return (text.results ?? []).map(\.boundingBox) + (faces.results ?? []).map(\.boundingBox) + (codes.results ?? []).map(\.boundingBox)
+    }
+
+    static func redact(_ url: URL) async throws -> URL {
+        let (image, _) = try loadUpright(url)
+        let boxes = try sensitiveAreas(in: image)
         guard !boxes.isEmpty else { throw ConvertError("Found no text, faces or codes to redact.") }
 
         let w = CGFloat(image.width), h = CGFloat(image.height)
@@ -503,10 +525,7 @@ enum Ops {
     static func readCodes(_ url: URL) async throws -> [String] {
         let image: CGImage
         if Kind.of(url) == .pdf, let page = PDFDocument(url: url)?.page(at: 0) {
-            let size = page.bounds(for: .mediaBox).size
-            let thumb = page.thumbnail(of: NSSize(width: size.width * 3, height: size.height * 3), for: .mediaBox)
-            var rect = CGRect(origin: .zero, size: thumb.size)
-            guard let cg = thumb.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return [] }
+            guard let cg = Converter.render(page, scale: 3) else { return [] }
             image = cg
         } else {
             image = try loadUpright(url).0
@@ -570,7 +589,7 @@ enum Ops {
     static func mute(_ url: URL) async throws -> URL {
         let (comp, hasVideo) = try await composition([url], audio: false)
         guard hasVideo else { throw ConvertError("There's no picture to keep.") }
-        let ext = ["mov", "mp4", "m4v"].contains(url.pathExtension.lowercased()) ? url.pathExtension : "mov"
+        let ext = movieExtension(url, else: "mov")
         let out = sibling(url, "muted", ext: ext)
         try await export(comp, preset: AVAssetExportPresetPassthrough, to: out)
         return out
@@ -669,7 +688,7 @@ enum Ops {
     static func readMetadata(_ url: URL) async -> [MetaRow] {
         var rows: [MetaRow] = []
         let values = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey, .contentModificationDateKey])
-        rows.append(MetaRow(key: "File › Size", value: ByteCountFormatter.string(fromByteCount: Int64(values?.fileSize ?? 0), countStyle: .file)))
+        rows.append(MetaRow(key: "File › Size", value: bytes(Int64(values?.fileSize ?? 0))))
         if let d = values?.creationDate { rows.append(MetaRow(key: "File › Created", value: d.formatted())) }
         if let d = values?.contentModificationDate { rows.append(MetaRow(key: "File › Modified", value: d.formatted())) }
 
@@ -743,7 +762,7 @@ enum Ops {
             }
         case .video, .audio:
             let e = url.pathExtension.lowercased()
-            guard ["mov", "mp4", "m4v", "m4a"].contains(e) else { throw ConvertError("Convert to MP4/MOV/M4A first, then strip.") }
+            guard taggableExtensions.contains(e) else { throw ConvertError("Convert to MP4/MOV/M4A first, then strip.") }
             try await export(AVURLAsset(url: url), preset: AVAssetExportPresetPassthrough, to: out, stripMetadata: true)
         case .pdf:
             guard let doc = PDFDocument(url: url) else { throw ConvertError("Couldn't open the PDF.") }
@@ -826,6 +845,20 @@ enum Editors {
 
 // MARK: Crop
 
+/// Editor canvases show the picture fitted inside the view, and map pointer positions back onto it.
+extension CGRect {
+    static func fitting(_ image: CGImage, in size: CGSize, margin: CGFloat = 20) -> CGRect {
+        let iw = CGFloat(image.width), ih = CGFloat(image.height)
+        let scale = min((size.width - 2 * margin) / iw, (size.height - 2 * margin) / ih)
+        return CGRect(x: (size.width - iw * scale) / 2, y: (size.height - ih * scale) / 2, width: iw * scale, height: ih * scale)
+    }
+
+    /// A point in the view as a 0…1 position on this rect (top-left origin), clamped to it.
+    func normalised(_ p: CGPoint) -> CGPoint {
+        CGPoint(x: Swift.min(Swift.max((p.x - minX) / width, 0), 1), y: Swift.min(Swift.max((p.y - minY) / height, 0), 1))
+    }
+}
+
 @MainActor
 final class CropModel: ObservableObject {
     let url: URL
@@ -835,6 +868,7 @@ final class CropModel: ObservableObject {
     @Published var error: String?
     @Published var saving = false
     let isVideo: Bool
+    private var props: [CFString: Any] = [:]
     var dragStart: CGRect?
     weak var window: NSWindow?
 
@@ -844,7 +878,7 @@ final class CropModel: ObservableObject {
         if isVideo {
             Task { await loadFrame() }
         } else {
-            do { image = try Ops.loadUpright(url).0 } catch { self.error = error.localizedDescription }
+            do { (image, props) = try Ops.loadUpright(url) } catch { self.error = error.localizedDescription }
         }
     }
 
@@ -877,12 +911,9 @@ final class CropModel: ObservableObject {
         if isVideo { Task { await saveVideo() }; return }
         guard let image, let cropped = image.cropping(to: pixelRect) else { return }
         do {
-            let props = (CGImageSourceCreateWithURL(url as CFURL, nil)).flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) as? [CFString: Any] } ?? [:]
             let out = Ops.editedURL(url, "cropped")
             try Ops.save(cropped, to: out, props: Ops.keptMetadata(props))
-            Donation.recordUse()
-            NSWorkspace.shared.activateFileViewerSelecting([out])
-            window?.close()
+            Ops.delivered([out], closing: window)
         } catch { self.error = error.localizedDescription }
     }
 
@@ -909,12 +940,9 @@ final class CropModel: ObservableObject {
             composition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps > 0 ? fps.rounded() : 30))
             composition.instructions = [instruction]
 
-            let e = url.pathExtension.lowercased()
-            let out = Ops.sibling(url, "cropped", ext: ["mov", "mp4", "m4v"].contains(e) ? e : "mp4")
+            let out = Ops.sibling(url, "cropped", ext: Ops.movieExtension(url, else: "mp4"))
             try await Ops.export(asset, preset: AVAssetExportPresetHighestQuality, to: out, videoComposition: composition)
-            Donation.recordUse()
-            NSWorkspace.shared.activateFileViewerSelecting([out])
-            window?.close()
+            Ops.delivered([out], closing: window)
         } catch { self.error = error.localizedDescription }
     }
 }
@@ -950,13 +978,9 @@ struct CropView: View {
 
     func canvas(_ image: CGImage, in size: CGSize) -> some View {
         let iw = CGFloat(image.width), ih = CGFloat(image.height)
-        let scale = min((size.width - 40) / iw, (size.height - 40) / ih)
-        let fit = CGRect(x: (size.width - iw * scale) / 2, y: (size.height - ih * scale) / 2, width: iw * scale, height: ih * scale)
+        let fit = CGRect.fitting(image, in: size)
         let r = CGRect(x: fit.minX + model.rect.minX * fit.width, y: fit.minY + model.rect.minY * fit.height,
                        width: model.rect.width * fit.width, height: model.rect.height * fit.height)
-        func normalised(_ p: CGPoint) -> CGPoint {
-            CGPoint(x: min(max((p.x - fit.minX) / fit.width, 0), 1), y: min(max((p.y - fit.minY) / fit.height, 0), 1))
-        }
         return ZStack(alignment: .topLeading) {
             Image(decorative: image, scale: 1).resizable()
                 .frame(width: fit.width, height: fit.height).position(x: fit.midX, y: fit.midY)
@@ -987,7 +1011,7 @@ struct CropView: View {
                 Circle().fill(Color.white).frame(width: 16, height: 16).shadow(radius: 2)
                     .position(point)
                     .gesture(DragGesture(coordinateSpace: .named("crop")).onChanged { v in
-                        drag(corner: corner, to: normalised(v.location), imageRatio: iw / ih)
+                        drag(corner: corner, to: fit.normalised(v.location), imageRatio: iw / ih)
                     })
             }
         }
@@ -1045,12 +1069,12 @@ final class MediaModel: ObservableObject {
         let duration = item.duration
         let start = item.reversePlaybackEndTime.isValid ? item.reversePlaybackEndTime : .zero
         let end = item.forwardPlaybackEndTime.isValid ? item.forwardPlaybackEndTime : duration
-        await saveOne("trimmed") { try await self.exportRange(CMTimeRange(start: start, end: end), suffix: "trimmed") }
+        await save { [try await self.exportRange(CMTimeRange(start: start, end: end), suffix: "trimmed")] }
     }
 
     func snapshot() async {
         let time = player.currentTime()
-        await save("snapshot") {
+        await save {
             let generator = AVAssetImageGenerator(asset: AVURLAsset(url: self.url))
             generator.appliesPreferredTrackTransform = true
             generator.requestedTimeToleranceBefore = .zero
@@ -1067,13 +1091,13 @@ final class MediaModel: ObservableObject {
         guard let item = player.currentItem else { return }
         let t = player.currentTime(), duration = item.duration
         guard t.seconds > 0.1, t.seconds < duration.seconds - 0.1 else { status = "Move the playhead to where you want the cut."; return }
-        await save("split") {
+        await save {
             [try await self.exportRange(CMTimeRange(start: .zero, end: t), suffix: "part 1"),
              try await self.exportRange(CMTimeRange(start: t, end: duration), suffix: "part 2")]
         }
     }
 
-    private func save(_ label: String, _ work: @escaping () async throws -> [URL]) async {
+    private func save(_ work: @escaping () async throws -> [URL]) async {
         busy = true
         status = "Saving…"
         defer { busy = false }
@@ -1083,13 +1107,10 @@ final class MediaModel: ObservableObject {
         } catch { status = error.localizedDescription }
     }
 
-    private func saveOne(_ label: String, _ work: @escaping () async throws -> URL) async {
-        await save(label) { [try await work()] }
-    }
 
     func exportRange(_ range: CMTimeRange, suffix: String) async throws -> URL {
         let e = url.pathExtension.lowercased()
-        let ext = isVideo ? (["mov", "mp4", "m4v"].contains(e) ? e : "mov") : "m4a"
+        let ext = isVideo ? Ops.movieExtension(url, else: "mov") : "m4a"
         let preset = isVideo || e == "m4a" ? AVAssetExportPresetPassthrough : AVAssetExportPresetAppleM4A
         let out = Ops.sibling(url, suffix, ext: ext)
         try await Ops.export(AVURLAsset(url: url), preset: preset, to: out, timeRange: range)
@@ -1170,7 +1191,13 @@ final class MetadataModel: ObservableObject {
 
 struct MetadataView: View {
     let url: URL
+    let kind: Kind   // looked up once; the form below is re-evaluated on every keystroke
     @StateObject private var model = MetadataModel()
+
+    init(url: URL) {
+        self.url = url
+        kind = Kind.of(url)
+    }
 
     var hasLocation: Bool { model.rows.contains { $0.key.hasPrefix("GPS") } }
 
@@ -1196,13 +1223,13 @@ struct MetadataView: View {
                 .listStyle(.inset(alternatesRowBackgrounds: true))
             }
             Divider()
-            if [.image, .video, .audio, .pdf].contains(Kind.of(url)) {
+            if [.image, .video, .audio, .pdf].contains(kind) {
                 Form {
                     TextField("Title", text: $model.edit.title)
-                    TextField(Kind.of(url) == .audio ? "Artist" : "Author", text: $model.edit.author)
-                    if Kind.of(url) != .pdf { TextField("Copyright", text: $model.edit.copyright) }
+                    TextField(kind == .audio ? "Artist" : "Author", text: $model.edit.author)
+                    if kind != .pdf { TextField("Copyright", text: $model.edit.copyright) }
                     TextField("Description", text: $model.edit.description)
-                    if [.image, .pdf].contains(Kind.of(url)) { TextField("Keywords", text: $model.edit.keywords, prompt: Text("comma, separated")) }
+                    if [.image, .pdf].contains(kind) { TextField("Keywords", text: $model.edit.keywords, prompt: Text("comma, separated")) }
                 }
                 .padding(.horizontal, 16).padding(.top, 10)
             }

@@ -11,6 +11,12 @@ import QuickLookThumbnailing
 
 enum PetalAction { case convert(Format), op(Op), copy, more }
 
+extension NSScreen {
+    static var underPointer: NSScreen {
+        screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? main!
+    }
+}
+
 struct Petal: Identifiable {
     let id: String
     let title: String
@@ -26,8 +32,19 @@ final class Shelf: ObservableObject {
     static let diameter: CGFloat = 400
     static let panelSize = NSSize(width: 440, height: 464)
 
-    @Published var urls: [URL] = []
-    @Published var mode: Mode = .convert
+    /// What's being dragged. Setting it works out the kind and tools once, rather than on every redraw.
+    @Published var urls: [URL] = [] {
+        didSet {
+            let kinds = Set(urls.map(Kind.of))
+            kind = kinds.count == 1 ? kinds.first : nil
+            tools = Op.available(for: kind, count: urls.count)
+            petals = makePetals()
+        }
+    }
+    @Published var mode: Mode = .convert { didSet { if mode != oldValue { petals = makePetals() } } }
+    private(set) var kind: Kind?
+    private(set) var tools: [Op] = []
+    @Published private(set) var petals: [Petal] = []
     @Published var hovered: Int?
     @Published var thumbnail: NSImage?
     @Published var sizeLabel = ""
@@ -39,51 +56,44 @@ final class Shelf: ObservableObject {
     private var panel: NSPanel!
     private var changeCountAtMouseDown = 0
     private var buttonDown = false
+    private var emptyDragCount = -1   // a drag pasteboard already found to hold no files
     private var hideTask: Task<Void, Never>?
-
-    var kind: Kind? {
-        let kinds = Set(urls.map(Kind.of))
-        return kinds.count == 1 ? kinds.first : nil
-    }
-
-    var tools: [Op] { Op.available(for: kind, count: urls.count) }
+    private var measureTask: Task<Void, Never>?
 
     /// Total size of what's being dragged, folders included; big folders fill in a moment later.
     private func measure(_ urls: [URL]) {
         sizeLabel = "…"
-        let id = showID
-        Task.detached(priority: .userInitiated) {
+        measureTask?.cancel()
+        measureTask = Task.detached(priority: .userInitiated) {
             let total = urls.reduce(Int64(0)) { $0 + SizeItem.measure($1).bytes }
-            await MainActor.run {
-                if Shelf.shared.showID == id { Shelf.shared.sizeLabel = bytes(total) }
-            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { Shelf.shared.sizeLabel = bytes(total) }
         }
     }
 
-    var petals: [Petal] {
+    private static let extensionAliases = ["jpeg": "jpg", "tif": "tiff", "aif": "aiff", "htm": "html"]
+
+    private func archivePetal(_ id: String) -> Petal {
+        let f = Formats.archiveOut.first { $0.id == id }!
+        return Petal(id: id, title: Formats.short(f), symbol: "archivebox", action: .convert(f))
+    }
+
+    private func makePetals() -> [Petal] {
         let more = Petal(id: "more", title: "More", symbol: "ellipsis.circle", action: .more)
         let copy = Petal(id: "copy", title: "Copy", symbol: "doc.on.doc", action: .copy)
         if mode == .tools, !tools.isEmpty {
             var items = tools.map { Petal(id: $0.rawValue, title: $0.title, symbol: $0.symbol, action: .op($0)) }
-            if items.count < 4 {   // a near-empty wheel: offer zipping too
-                items += Formats.archiveOut.filter { ["zip", "7z"].contains($0.id) }.map {
-                    Petal(id: $0.id, title: Formats.short($0), symbol: "archivebox", action: .convert($0))
-                }
-            }
+            if items.count < 4 { items += ["zip", "7z"].map(archivePetal) }   // a near-empty wheel: offer zipping too
             return items + [copy, more]
         }
         // Skip "convert to what it already is" (re-encodes like HEVC or 16-bit TIFF have their own ids, so they stay).
-        let aliases = ["jpeg": "jpg", "tif": "tiff", "aif": "aiff", "htm": "html"]
-        let exts = Set(urls.map { aliases[$0.pathExtension.lowercased()] ?? $0.pathExtension.lowercased() })
+        let exts = Set(urls.map { Self.extensionAliases[$0.pathExtension.lowercased()] ?? $0.pathExtension.lowercased() })
         let formats = (kind.map(Formats.shelf(for:)) ?? []).filter { !(exts == [$0.ext] && $0.id == $0.ext) }
         var items = formats.map {
             Petal(id: $0.id, title: Formats.short($0), symbol: $0.id == "extract" ? "archivebox" : nil, action: .convert($0))
         }
         let archives = kind == .archive ? ["zip", "7z"] : items.isEmpty ? ["zip", "7z", "tgz", "txz"] : ["zip"]
-        items += archives.map { id in
-            let f = Formats.archiveOut.first { $0.id == id }!
-            return Petal(id: id, title: Formats.short(f), symbol: "archivebox", action: .convert(f))
-        }
+        items += archives.map(archivePetal)
         return items + [copy, more]
     }
 
@@ -103,10 +113,12 @@ final class Shelf: ObservableObject {
         let timer = Timer(timeInterval: 1.0 / 25, repeats: true) { _ in
             MainActor.assumeIsolated { Shelf.shared.poll(drag) }
         }
+        timer.tolerance = 0.01   // lets macOS batch the wakeups
         RunLoop.main.add(timer, forMode: .common)
     }
 
     private func poll(_ drag: NSPasteboard) {
+        guard enabled else { return }
         let down = NSEvent.pressedMouseButtons & 1 != 0
         if down && !buttonDown {
             // A drag that starts during this press will bump the drag pasteboard past this count.
@@ -121,7 +133,6 @@ final class Shelf: ObservableObject {
     }
 
     private func dragged(_ drag: NSPasteboard) {
-        guard enabled else { return }
         let flags = NSEvent.modifierFlags
         if panel.isVisible {
             // Option can be pressed or released mid-drag to flip between formats and tools.
@@ -129,9 +140,12 @@ final class Shelf: ObservableObject {
             if wanted != mode { mode = wanted; hovered = nil }
             return
         }
-        guard flags.contains(.shift), drag.changeCount != changeCountAtMouseDown,
-              let urls = drag.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-              !urls.isEmpty else { return }
+        guard flags.contains(.shift), drag.changeCount != changeCountAtMouseDown, drag.changeCount != emptyDragCount else { return }
+        let urls = drag.fileURLs
+        guard !urls.isEmpty else {
+            emptyDragCount = drag.changeCount   // dragging text or such: don't re-read it 25 times a second
+            return
+        }
         self.urls = urls
         mode = flags.contains(.option) ? .tools : .convert
         hovered = nil
@@ -155,7 +169,7 @@ final class Shelf: ObservableObject {
         hideTask?.cancel()
         let size = Self.panelSize
         let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main!
+        let screen = NSScreen.underPointer
         let visible = screen.visibleFrame
         // Centre the wheel (not the whole panel, which has a caption below) on the pointer.
         let wheelCentreFromTop = 10 + Self.diameter / 2
@@ -169,6 +183,7 @@ final class Shelf: ObservableObject {
 
     func hide() {
         hideTask?.cancel()
+        measureTask?.cancel()
         panel.orderOut(nil)
         hovered = nil
     }
@@ -272,6 +287,7 @@ struct WheelView: View {
                 ForEach(Array(petals.enumerated()), id: \.element.id) { i, petal in
                     PetalView(petal: petal, index: i, count: petals.count, hovered: shelf.hovered == i,
                               inner: inner, outer: outer - 4, size: size, dark: dark)
+                        .equatable()
                 }
                 hub(dark: dark)
             }
@@ -332,7 +348,13 @@ struct DropTarget: ViewModifier {
     }
 }
 
-struct PetalView: View {
+/// Equatable so a hover change redraws only the two petals it affects, not the whole ring.
+struct PetalView: View, Equatable {
+    static func == (a: PetalView, b: PetalView) -> Bool {
+        a.petal.id == b.petal.id && a.petal.title == b.petal.title && a.index == b.index && a.count == b.count
+            && a.hovered == b.hovered && a.dark == b.dark && a.inner == b.inner && a.outer == b.outer
+    }
+
     let petal: Petal
     let index: Int
     let count: Int
@@ -524,7 +546,7 @@ final class JobHUD: ObservableObject {
         panel.contentView = NSHostingView(rootView: JobHUDView(hud: self))
 
         // Stack in the top-right corner of the screen the pointer is on.
-        let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main!
+        let screen = NSScreen.underPointer
         let v = screen.visibleFrame
         panel.setFrameTopLeftPoint(NSPoint(x: v.maxX - 360, y: v.maxY - 16 - CGFloat(Self.open.count) * 140))
         Self.open.append(self)
@@ -540,9 +562,8 @@ final class JobHUD: ObservableObject {
         self.note = note
         done = total
         finished = true
-        outs.forEach { _ in Donation.recordUse() }
         NSSound(named: errors.isEmpty ? "Glass" : "Basso")?.play()
-        if !outs.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(outs) }
+        Ops.delivered(outs)
         if errors.isEmpty && note == nil {
             Task { try? await Task.sleep(for: .seconds(3)); close() }
         }
