@@ -298,6 +298,9 @@ struct ConvertError: LocalizedError {
 }
 
 enum Converter {
+    /// Long jobs report steps ("Page 3 of 8") here; the progress window sets it for the task it runs.
+    @TaskLocal static var report: (@Sendable (String) -> Void)?
+
     /// Converts one file and returns the written file (or folder, for multi-page output).
     static func convert(_ input: URL, to format: Format, options: Options) async throws -> URL {
         guard Tools.has(format.needs) else {

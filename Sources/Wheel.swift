@@ -231,7 +231,9 @@ final class Shelf: ObservableObject {
             } else {
                 for url in urls {
                     hud.current = url.lastPathComponent
-                    do { outs.append(try await Converter.convert(url, to: format, options: options)) }
+                    let name = url.lastPathComponent
+                    let report: @Sendable (String) -> Void = { step in Task { @MainActor in hud.current = "\(name) · \(step)" } }
+                    do { outs.append(try await Converter.$report.withValue(report) { try await Converter.convert(url, to: format, options: options) }) }
                     catch { errors.append("\(url.lastPathComponent): \(error.localizedDescription)") }
                     hud.done += 1
                 }

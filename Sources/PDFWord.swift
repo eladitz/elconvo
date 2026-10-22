@@ -40,8 +40,13 @@ enum PDFToWord {
         var body = ""
         for i in 0..<doc.pageCount {
             guard let page = doc.page(at: i) else { continue }
+            Converter.report?("page \(i + 1) of \(doc.pageCount)")
             if i > 0 { body += "<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>" }
-            body += try await pageXML(page)
+            do {
+                body += try await pageXML(page)
+            } catch is LayoutTimeout {
+                body += plainPageXML(page)   // keep going with the words, minus the structure
+            }
         }
         try write(body: body, pageSize: displaySize(first), to: out)
     }
@@ -59,7 +64,7 @@ enum PDFToWord {
         let picture = page.thumbnail(of: NSSize(width: size.width * scale, height: size.height * scale), for: .cropBox)
         var rect = CGRect(origin: .zero, size: picture.size)
         guard let image = picture.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return "" }
-        guard let container = try await RecognizeDocumentsRequest().perform(on: image).first?.document else { return "" }
+        guard let container = try await recognize(image) else { return "" }
 
         let box = page.bounds(for: .cropBox)
         let textLayer = page.rotation == 0 && !(page.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -155,6 +160,48 @@ enum PDFToWord {
         // Top of the page first (Vision's y grows upward), then left to right.
         blocks.sort { abs($0.top - $1.top) > 0.004 ? $0.top > $1.top : $0.left < $1.left }
         return blocks.map(\.xml).joined()
+    }
+
+    struct LayoutTimeout: Error {}
+
+    /// Vision's layout model is loaded by a system service on first use, and that has been seen to stall
+    /// for minutes. Give each page a fixed budget instead of waiting forever.
+    static func recognize(_ image: CGImage, seconds: Double = 30) async throws -> Container? {
+        // Not a task group: a group waits for every child, so a request that ignores cancellation
+        // would still hold us. Whichever side finishes first resumes; the other is ignored.
+        try await withCheckedThrowingContinuation { continuation in
+            let once = Once()
+            let work = Task {
+                do {
+                    let result = try await RecognizeDocumentsRequest().perform(on: image).first?.document
+                    if once.claim() { continuation.resume(returning: result) }
+                } catch {
+                    if once.claim() { continuation.resume(throwing: error) }
+                }
+            }
+            Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                if once.claim() {
+                    work.cancel()
+                    continuation.resume(throwing: LayoutTimeout())
+                }
+            }
+        }
+    }
+
+    final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var taken = false
+        func claim() -> Bool { lock.withLock { defer { taken = true }; return !taken } }
+    }
+
+    /// The page's text (or OCR of it) as plain paragraphs, for when layout recognition gives up.
+    static func plainPageXML(_ page: PDFPage) -> String {
+        var text = page.string ?? ""
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { text = Converter.ocr(page) }
+        return text.components(separatedBy: "\n\n").map { block in
+            paragraphXML(block.trimmingCharacters(in: .whitespacesAndNewlines))
+        }.joined()
     }
 
     /// Lets Word re-flow body text, but keeps the line breaks of short-lined blocks (addresses, signatures).
