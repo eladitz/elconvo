@@ -1472,6 +1472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async { _ = Tools.ffmpegEncoders }
         Donation.start()
         offerLoginItemOnce()
+        FullDiskAccess.offerIfNeeded()
         // No window on launch: everything happens from the drag wheel.
         JobHUD.notice("Elconvo is running",
                       "Hold ⇧ while dragging a file to convert it. Hold ⌥⇧ for tools.\nThe full window is in the menu bar.")
@@ -1548,6 +1549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openWindow() { showMainWindow() }
+    @objc func grantAccess() { FullDiskAccess.ask(fromMenu: true) }
     @objc func donate() { NSWorkspace.shared.open(Donation.page) }
     @objc func website() { NSWorkspace.shared.open(URL(string: "https://ai.itzkin.com/elconvo.html")!) }
     @objc func addFiles() { showMainWindow(); Store.shared.add(chooseFiles()) }
@@ -1605,6 +1607,9 @@ extension AppDelegate: NSMenuDelegate {
         shelf.state = Shelf.shared.enabled ? .on : .off
         let login = menu.addItem(withTitle: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        let access = menu.addItem(withTitle: FullDiskAccess.isGranted ? "Full Disk Access: On" : "Grant Full Disk Access…",
+                                  action: #selector(grantAccess), keyEquivalent: "")
+        access.state = FullDiskAccess.isGranted ? .on : .off
         menu.addItem(.separator())
         menu.addItem(withTitle: "Support Elconvo on Ko-fi…", action: #selector(donate), keyEquivalent: "")
         menu.addItem(withTitle: "Elconvo Website", action: #selector(website), keyEquivalent: "")

@@ -66,6 +66,7 @@ Edits are always saved as a new file beside the original, never over it. The one
 1. [Download Elconvo.dmg](https://github.com/eladitz/elconvo/releases/latest/download/Elconvo.dmg), open it and drag **Elconvo** into **Applications**.
 2. The app isn't signed with an Apple Developer ID yet, so the first time you open it macOS will refuse. Go to **System Settings ▸ Privacy & Security**, scroll down and click **Open Anyway**. You only do this once.
 3. Say yes to *Open at Login* so the wheel is always available.
+4. When it offers **Full Disk Access**, click **Open Settings** and switch Elconvo on (Touch ID). That one switch replaces the separate prompts for Desktop, Documents, Downloads, iCloud Drive and every USB drive. Later: menu bar icon ▸ Grant Full Disk Access.
 
 ### Optional extras (free)
 
