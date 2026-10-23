@@ -57,6 +57,7 @@ Elconvo lives in the menu bar and offers to start at login, so the wheel is alwa
 - **Trim, Snapshot, Split** video and audio; **2× / ½ speed**, **Mute**, **Join**; audio **Normalize**, **Mono / Stereo**.
 - **PDF**: **Organize** pages (drag to reorder, rotate, delete), **Split**, **Rotate**, **Merge**.
 - **Metadata**: read everything (GPS location is flagged), edit title / author / copyright / description / keywords, or strip it all.
+- **Translate** (PDFs): opens them in [Elingo](https://github.com/eladitz/elingo), the free companion app, to fill in and sign a form in any language beside a live translation. Several PDFs open together with a file list.
 - **Rename** and **Batch Rename**: rename one file, or many at once (replace text, add text, name + number, change case) with a live before → after preview.
 - **Size & Info**: true size of files and folders, largest first, plus MD5 / SHA-1 / SHA-256 / SHA-512 / CRC-32 checksums with a paste-to-verify box.
 

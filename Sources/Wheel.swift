@@ -237,6 +237,8 @@ final class Shelf: ObservableObject {
         case .op(.fitSize):
             guard let target = askTargetSize(urls) else { return }
             Task { await Ops.run(.fitSize, urls, hud: JobHUD(title: "Fitting to \(bytes(target))", total: urls.count), target: target) }
+        case .op(.translate):
+            Editors.openInElingo(urls.filter { Kind.of($0) == .pdf })
         case .op(let op):
             if op.interactive { urls.prefix(6).forEach { Editors.open(op, $0) } }
             else { Task { await Ops.run(op, urls, hud: JobHUD(title: op.title, total: op.combines ? 1 : urls.count)) } }

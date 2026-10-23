@@ -16,7 +16,7 @@ enum Op: String, Identifiable, CaseIterable {
     case trim, snapshot, faster, slower, mute, join
     case normalize, mono, stereo
     case merge, split, rotatePages, organize
-    case info, rename, batchRename
+    case info, rename, batchRename, translate
 
     var id: String { rawValue }
 
@@ -30,6 +30,7 @@ enum Op: String, Identifiable, CaseIterable {
         case .info: "Size & Info"
         case .rename: "Rename"
         case .batchRename: "Batch Rename"
+        case .translate: "Translate"
         case .removeBackground: "Remove BG"
         case .crop: "Crop"
         case .rotate, .rotatePages: "Rotate"
@@ -62,6 +63,7 @@ enum Op: String, Identifiable, CaseIterable {
         case .info: "info.circle"
         case .rename: "character.cursor.ibeam"
         case .batchRename: "list.number"
+        case .translate: "translate"
         case .removeBackground: "person.crop.rectangle"
         case .crop: "crop"
         case .rotate, .rotatePages: "rotate.right"
@@ -86,7 +88,7 @@ enum Op: String, Identifiable, CaseIterable {
     /// Works on all the dropped files together rather than one by one.
     var combines: Bool { [.collage, .toPDF, .join, .merge, .info, .batchRename].contains(self) }
     /// Opens a window instead of running straight away.
-    var interactive: Bool { [.crop, .adjust, .markup, .trim, .snapshot, .metadata, .organize, .info, .rename, .batchRename].contains(self) }
+    var interactive: Bool { [.crop, .adjust, .markup, .trim, .snapshot, .metadata, .organize, .info, .rename, .batchRename, .translate].contains(self) }
     /// Editors that work on one file at a time; left off the wheel when several files are dragged.
     var singleFile: Bool { [.crop, .adjust, .markup, .trim, .snapshot, .organize, .split, .rename].contains(self) }
 
@@ -98,7 +100,7 @@ enum Op: String, Identifiable, CaseIterable {
         case .raw: ops = [.compress, .fitSize, .crop, .adjust, .metadata]
         case .video: ops = [.compress, .fitSize, .removeBackground, .trim, .crop, .snapshot, .faster, .slower, .mute, .metadata] + (multi ? [.join] : [])
         case .audio: ops = [.compress, .fitSize, .trim, .normalize, .mono, .stereo, .faster, .metadata] + (multi ? [.join] : [])
-        case .pdf: ops = [.compress, .fitSize, .organize, .split, .rotatePages, .metadata, .readQR] + (multi ? [.merge] : [])
+        case .pdf: ops = [.translate, .compress, .fitSize, .organize, .split, .rotatePages, .metadata, .readQR] + (multi ? [.merge] : [])
         default: ops = []
         }
         if multi { ops.removeAll { $0.singleFile || $0 == .readQR } }
@@ -849,8 +851,27 @@ enum Editors {
             Renamer.renameOne(url)
         case .batchRename:
             openBatchRename([url])
+        case .translate:
+            openInElingo([url])
         default: break
         }
+    }
+
+    /// Translate (and fill in and sign) lives in its own free app, Elingo. Hand the PDFs over in one go,
+    /// so they share one window with a file list, or offer the app.
+    static func openInElingo(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.itzkin.elingo") {
+            NSWorkspace.shared.open(urls, withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Translate opens in Elingo"
+        alert.informativeText = "Elingo is a free companion app: fill in and sign a PDF in any language while a mirrored copy shows it translated into yours. It needs macOS 26 or later."
+        alert.addButton(withTitle: "Get Elingo")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(URL(string: "https://ai.itzkin.com/elingo.html")!) }
     }
 
     static func openBatchRename(_ urls: [URL]) {
