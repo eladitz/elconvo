@@ -191,12 +191,12 @@ enum Ops {
 
     // MARK: Helpers
 
-    /// Every finished job ends the same way: it counts toward the donation prompt, Finder shows
-    /// the result, and the editor that made it (if any) closes.
+    /// Every finished job ends the same way: it counts toward the donation prompt and the editor that
+    /// made it (if any) closes. The result lands beside the original, in the folder the user is already
+    /// looking at, so no Finder window is opened; the progress card has "Show in Finder" for that.
     @MainActor
     static func delivered(_ outs: [URL], closing window: NSWindow? = nil) {
         outs.forEach { _ in Donation.recordUse() }
-        if !outs.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(outs) }
         window?.close()
     }
 
@@ -1205,7 +1205,6 @@ final class MetadataModel: ObservableObject {
             let out = try await Ops.stripMetadata(url)
             saved = out
             status = "Saved \(out.lastPathComponent)"
-            NSWorkspace.shared.activateFileViewerSelecting([out])
         } catch { status = error.localizedDescription }
     }
 }

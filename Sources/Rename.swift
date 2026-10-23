@@ -32,7 +32,6 @@ enum Renamer {
                 throw ConvertError("There's already an item called “\(name)” there.")
             }
             try FileManager.default.moveItem(at: url, to: target)
-            NSWorkspace.shared.activateFileViewerSelecting([target])
         } catch {
             NSAlert(error: error).runModal()
         }
