@@ -2,7 +2,7 @@
 # Builds Elconvo.app (Apple Silicon + Intel) with the Command Line Tools; no Xcode needed.
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION=1.0.6
+VERSION=1.0.7
 APP=build/Elconvo.app
 rm -rf "$APP" build/Elconvo.iconset
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

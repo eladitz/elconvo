@@ -112,9 +112,12 @@ Elconvo.app/Contents/MacOS/Elconvo --tool compress video.mov
 | `Sources/VideoMatte.swift` | Video background removal |
 | `Sources/Rename.swift` | Rename and Batch Rename |
 | `Sources/Donate.swift` | The once-a-month "enjoying it?" note |
+| `Sources/Updater.swift` | Daily check for a newer release on GitHub |
 
 ## Support
 
-Elconvo is free and made by one person. If it saves you time, a coffee on **[Ko-fi](https://ko-fi.com/eladitzkin)** keeps it going. The app asks once a month whether you like it, and stops asking for a year if you've donated.
+Elconvo is free and made by one person. If it saves you time, a coffee on **[Ko-fi](https://ko-fi.com/eladitzkin)** keeps it going. The app asks once a month whether you like it, and stops asking for a year if you've donated (in Elxplorer too).
+
+Once a day Elconvo checks GitHub for a newer release and offers to download it (or use **Check for Updates…** in the menu bar menu).
 
 Made by Elad Itzkin · [ai.itzkin.com](https://ai.itzkin.com) · [elad.itzkin.com](https://elad.itzkin.com). MIT licensed.

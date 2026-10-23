@@ -1482,6 +1482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Spawning ffmpeg to list its encoders takes a moment; do it now rather than inside the first OGG job.
         DispatchQueue.global(qos: .utility).async { _ = Tools.ffmpegEncoders }
         Donation.start()
+        Updater.start()
         offerLoginItemOnce()
         FullDiskAccess.offerIfNeeded()
         // No window on launch: everything happens from the drag wheel.
@@ -1562,6 +1563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func openWindow() { showMainWindow() }
     @objc func grantAccess() { FullDiskAccess.ask(fromMenu: true) }
     @objc func donate() { NSWorkspace.shared.open(Donation.page) }
+    @objc func checkForUpdates() { Task { await Updater.check(manual: true) } }
     @objc func website() { NSWorkspace.shared.open(URL(string: "https://ai.itzkin.com/elconvo.html")!) }
     @objc func addFiles() { showMainWindow(); Store.shared.add(chooseFiles()) }
     @objc func toggleShelf() { Shelf.shared.enabled.toggle() }
@@ -1624,7 +1626,7 @@ extension AppDelegate: NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Support Elconvo on Ko-fi…", action: #selector(donate), keyEquivalent: "")
         menu.addItem(withTitle: "Elconvo Website", action: #selector(website), keyEquivalent: "")
-        menu.addItem(withTitle: "Check for Updates…", action: #selector(website), keyEquivalent: "")
+        menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
         menu.addItem(withTitle: "Quit Elconvo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     }
 }
