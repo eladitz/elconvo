@@ -17,7 +17,7 @@ import Vision
 
 enum Kind: String, CaseIterable {
     case image = "Images", raw = "RAW Photos", audio = "Audio", video = "Video"
-    case document = "Documents", pdf = "PDF", data = "Data", subtitle = "Subtitles", model3d = "3D Models"
+    case document = "Documents", pdf = "PDF", spreadsheet = "Spreadsheets", data = "Data", subtitle = "Subtitles", model3d = "3D Models"
     case archive = "Archives", folder = "Folders"
     case unknown = "Other"
 
@@ -41,6 +41,7 @@ enum Kind: String, CaseIterable {
         .document: ["txt", "text", "md", "markdown", "rtf", "rtfd", "html", "htm", "doc", "docx", "odt",
                     "wordml", "webarchive"],
         .pdf: ["pdf", "ai"],   // Illustrator files are PDF-compatible
+        .spreadsheet: ["xlsx", "xlsm", "ods", "xls", "numbers"],
         .data: ["json", "plist", "csv", "tsv"],
         .subtitle: ["srt", "vtt"],
         .model3d: Kind.modelExtensions,
@@ -197,6 +198,7 @@ enum Formats {
         .init(id: "bplist", ext: "plist", label: "Property List (binary)"),
         .init(id: "csv", ext: "csv", label: "CSV"),
         .init(id: "tsv", ext: "tsv", label: "TSV"),
+        .init(id: "xlsx", ext: "xlsx", label: "Excel (XLSX)"),
     ]
 
     /// Everything a kind can become: real conversions first, then archive options.
@@ -215,6 +217,7 @@ enum Formats {
         case .video: return videoOut
         case .document: return documentOut
         case .pdf: return pdfOut
+        case .spreadsheet: return Spreadsheet.outputs
         case .data: return dataOut
         case .subtitle: return subtitleOut
         case .model3d: return Models3D.outputs
@@ -232,7 +235,8 @@ enum Formats {
         case .video: ["mp4", "mov", "mov-hevc", "m4v", "webm", "mkv", "vid-gif", "audio-m4a-aac", "audio-mp3"]
         case .document: ["doc-pdf", "docx", "txt", "html", "rtf"]
         case .pdf: ["pdf-png", "pdf-jpg", "pdf-txt", "pdf-docx"]
-        case .data: ["json", "csv", "plist"]
+        case .spreadsheet: ["sheet-csv", "xlsx", "sheet-pdf", "sheet-json", "sheet-tsv", "sheet-html"]
+        case .data: ["json", "csv", "plist", "xlsx"]
         case .subtitle: ["srt", "vtt", "sub-txt"]
         case .model3d: ["stl", "3mf", "obj", "usdz", "ply"]
         case .archive: ["extract"]
@@ -250,6 +254,7 @@ enum Formats {
         case .video: ext == "mp4" ? ["mov-hevc"] : ["mp4"]
         case .document: ext == "pdf" ? ["docx"] : ["doc-pdf"]
         case .pdf: ["pdf-png"]
+        case .spreadsheet: ["sheet-csv"]
         case .data: ext == "json" ? ["csv"] : ["json"]
         case .subtitle: ext == "srt" ? ["vtt"] : ["srt"]
         case .model3d: ext == "stl" ? ["3mf"] : ["stl"]
@@ -267,7 +272,8 @@ enum Formats {
                      "mov-hevc": "MOV HEVC", "vid-gif": "GIF", "audio-m4a-aac": "M4A Audio", "audio-mp3": "MP3 Audio",
                      "doc-pdf": "PDF", "pdf-png": "PNG", "pdf-jpg": "JPG", "pdf-tiff": "TIFF", "pdf-txt": "TXT",
                      "pdf-rtf": "RTF", "pdf-docx": "DOCX", "extract": "Extract", "tgz": "TAR.GZ", "txz": "TAR.XZ", "tbz": "TAR.BZ2", "m4r": "Ringtone",
-                     "sub-txt": "TXT", "bplist": "PLIST"]
+                     "sub-txt": "TXT", "bplist": "PLIST",
+                     "sheet-csv": "CSV", "sheet-tsv": "TSV", "sheet-json": "JSON", "sheet-html": "HTML", "sheet-pdf": "PDF"]
 
     static func byID(_ id: String) -> Format? {
         Kind.allCases.lazy.flatMap { conversions(for: $0) }.first { $0.id == id }
@@ -384,6 +390,8 @@ enum Converter {
             } else {
                 try await MainActor.run { try pdfToText(input, to: out, formatID: format.id) }
             }
+        case .spreadsheet:
+            return try await Spreadsheet.convert(input, to: out, formatID: format.id)
         case .data:
             try data(input, to: out, formatID: format.id)
         case .subtitle:
@@ -830,8 +838,9 @@ enum Converter {
         case "json": value = try JSONSerialization.jsonObject(with: raw, options: [.fragmentsAllowed])
         case "plist": value = try PropertyListSerialization.propertyList(from: raw, format: nil)
         case "csv", "tsv":
-            let text = String(decoding: raw, as: UTF8.self)
-            value = parseDelimited(text, separator: input.pathExtension.lowercased() == "tsv" ? "\t" : ",")
+            let rows = parseRows(String(decoding: raw, as: UTF8.self), separator: input.pathExtension.lowercased() == "tsv" ? "\t" : ",")
+            if formatID == "xlsx" { return try Spreadsheet.writeXLSX([.init(name: "Sheet1", rows: rows)], to: out) }
+            value = records(rows)
         default: throw ConvertError("Unsupported data file.")
         }
 
@@ -845,12 +854,14 @@ enum Converter {
                 format: formatID == "plist" ? .xml : .binary, options: 0)
             try data.write(to: out)
         case "csv", "tsv":
-            try writeDelimited(value, to: out, separator: formatID == "tsv" ? "\t" : ",")
+            try Spreadsheet.delimited(try table(value), formatID == "tsv" ? "\t" : ",").write(to: out, atomically: true, encoding: .utf8)
+        case "xlsx":
+            try Spreadsheet.writeXLSX([.init(name: "Sheet1", rows: try table(value))], to: out)
         default: throw ConvertError("Unsupported data format.")
         }
     }
 
-    static func parseDelimited(_ text: String, separator: Character) -> [[String: String]] {
+    static func parseRows(_ text: String, separator: Character) -> [[String]] {
         var rows: [[String]] = [], row: [String] = [], field = "", quoted = false
         var chars = Array(text.replacingOccurrences(of: "\r\n", with: "\n")).makeIterator()
         var pending: Character? = nil
@@ -869,36 +880,36 @@ enum Converter {
         }
         if !field.isEmpty || !row.isEmpty { row.append(field); rows.append(row) }
         rows.removeAll { $0 == [""] }
+        return rows
+    }
+
+    /// Rows with a header line → one record per row.
+    static func records(_ rows: [[String]]) -> [[String: String]] {
         guard let header = rows.first else { return [] }
         return rows.dropFirst().map { values in
             Dictionary(uniqueKeysWithValues: header.enumerated().map { i, key in (key, i < values.count ? values[i] : "") })
         }
     }
 
-    static func writeDelimited(_ value: Any, to out: URL, separator: String) throws {
+    /// Records (or a dictionary holding them) → a header row plus one row per record.
+    static func table(_ value: Any) throws -> [[String]] {
         let rows: [[String: Any]]
         if let array = value as? [[String: Any]] { rows = array }
         else if let dict = value as? [String: Any], let array = dict.values.first(where: { $0 is [[String: Any]] }) as? [[String: Any]] { rows = array }
         else if let dict = value as? [String: Any] { rows = [dict] }
-        else { throw ConvertError("CSV needs a list of records (an array of objects).") }
+        else { throw ConvertError("A table needs a list of records (an array of objects).") }
 
         var columns: [String] = []
         for row in rows { for key in row.keys.sorted() where !columns.contains(key) { columns.append(key) } }
         func cell(_ v: Any?) -> String {
             guard let v else { return "" }
-            var s: String
-            if let str = v as? String { s = str }
-            else if v is [Any] || v is [String: Any], let d = try? JSONSerialization.data(withJSONObject: jsonSafe(v)) {
-                s = String(decoding: d, as: UTF8.self)
-            } else { s = "\(v)" }
-            if s.contains(separator) || s.contains("\"") || s.contains("\n") {
-                s = "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+            if let str = v as? String { return str }
+            if v is [Any] || v is [String: Any], let d = try? JSONSerialization.data(withJSONObject: jsonSafe(v)) {
+                return String(decoding: d, as: UTF8.self)
             }
-            return s
+            return "\(v)"
         }
-        var lines = [columns.map { cell($0) }.joined(separator: separator)]
-        lines += rows.map { row in columns.map { cell(row[$0]) }.joined(separator: separator) }
-        try (lines.joined(separator: "\n") + "\n").write(to: out, atomically: true, encoding: .utf8)
+        return [columns] + rows.map { row in columns.map { cell(row[$0]) } }
     }
 
     static func jsonSafe(_ value: Any) -> Any {

@@ -2,7 +2,7 @@
 # Builds Elconvo.app (Apple Silicon + Intel) with the Command Line Tools; no Xcode needed.
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION=1.0.4
+VERSION=1.0.5
 APP=build/Elconvo.app
 rm -rf "$APP" build/Elconvo.iconset
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
@@ -34,6 +34,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSUIElement</key><true/>
+    <key>NSAppleEventsUsageDescription</key><string>Elconvo asks Numbers to open old Excel (.xls) and Numbers files so it can convert them.</string>
     <key>NSHumanReadableCopyright</key><string>Elad Itzkin</string>
     <key>NSServices</key>
     <array>

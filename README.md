@@ -44,7 +44,8 @@ Elconvo lives in the menu bar and offers to start at login, so the wheel is alwa
 | **PDF** (and Illustrator `.ai`) | Word (keeps headings, lists and **real tables**), images per page, text, RTF. Scanned pages are read with on-device OCR. |
 | **3D models** (OBJ, STL, PLY, 3MF, USDZ, USD, Alembic) | STL, 3MF, OBJ, PLY, USDZ, USDA |
 | **Subtitles** | SRT ↔ WebVTT, plain text |
-| **Data** | JSON ↔ CSV ↔ TSV ↔ Property list |
+| **Spreadsheets** | Excel (XLSX, XLSM), OpenDocument (ODS), and old Excel (XLS) or Apple Numbers files via the Numbers app → CSV, TSV, JSON, HTML table, PDF, XLSX. A workbook with several sheets becomes a folder with one file per sheet; dates stay dates |
+| **Data** | JSON ↔ CSV ↔ TSV ↔ Property list, and any of them → XLSX |
 | **Archives** (ZIP, 7z, RAR, TAR, GZ, BZ2, XZ, ISO, CAB…) | Extract, or pack any files and folders into ZIP, 7z, TAR.GZ, TAR.XZ, TAR.BZ2, TAR |
 
 ## Tools (⌥⇧-drag)
@@ -105,6 +106,7 @@ Elconvo.app/Contents/MacOS/Elconvo --tool compress video.mov
 | `Sources/main.swift` | Formats, the conversion engine, the batch window, app shell |
 | `Sources/Wheel.swift` | The drag wheel and progress windows |
 | `Sources/Tools.swift` | The ⌥⇧ tools, crop / trim / metadata windows |
+| `Sources/Spreadsheet.swift` | Excel / ODS reading and writing |
 | `Sources/Studio.swift` | Size & Info, Adjust, Markup, PDF organizer, metadata editing, 3D |
 | `Sources/PDFWord.swift` | PDF → Word that keeps headings, lists and tables |
 | `Sources/VideoMatte.swift` | Video background removal |
