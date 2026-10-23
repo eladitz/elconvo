@@ -16,7 +16,7 @@ enum Op: String, Identifiable, CaseIterable {
     case trim, snapshot, faster, slower, mute, join
     case normalize, mono, stereo
     case merge, split, rotatePages, organize
-    case info
+    case info, rename, batchRename
 
     var id: String { rawValue }
 
@@ -28,6 +28,8 @@ enum Op: String, Identifiable, CaseIterable {
         case .markup: "Markup"
         case .organize: "Organize"
         case .info: "Size & Info"
+        case .rename: "Rename"
+        case .batchRename: "Batch Rename"
         case .removeBackground: "Remove BG"
         case .crop: "Crop"
         case .rotate, .rotatePages: "Rotate"
@@ -58,6 +60,8 @@ enum Op: String, Identifiable, CaseIterable {
         case .markup: "pencil.tip.crop.circle"
         case .organize: "square.grid.3x2"
         case .info: "info.circle"
+        case .rename: "character.cursor.ibeam"
+        case .batchRename: "list.number"
         case .removeBackground: "person.crop.rectangle"
         case .crop: "crop"
         case .rotate, .rotatePages: "rotate.right"
@@ -80,11 +84,11 @@ enum Op: String, Identifiable, CaseIterable {
     }
 
     /// Works on all the dropped files together rather than one by one.
-    var combines: Bool { [.collage, .toPDF, .join, .merge, .info].contains(self) }
+    var combines: Bool { [.collage, .toPDF, .join, .merge, .info, .batchRename].contains(self) }
     /// Opens a window instead of running straight away.
-    var interactive: Bool { [.crop, .adjust, .markup, .trim, .snapshot, .metadata, .organize, .info].contains(self) }
+    var interactive: Bool { [.crop, .adjust, .markup, .trim, .snapshot, .metadata, .organize, .info, .rename, .batchRename].contains(self) }
     /// Editors that work on one file at a time; left off the wheel when several files are dragged.
-    var singleFile: Bool { [.crop, .adjust, .markup, .trim, .snapshot, .organize, .split].contains(self) }
+    var singleFile: Bool { [.crop, .adjust, .markup, .trim, .snapshot, .organize, .split, .rename].contains(self) }
 
     static func available(for kind: Kind?, count: Int) -> [Op] {
         let multi = count > 1
@@ -100,6 +104,7 @@ enum Op: String, Identifiable, CaseIterable {
         if multi { ops.removeAll { $0.singleFile || $0 == .readQR } }
         // Several items, folders or a mix: the size breakdown is the useful tool.
         if multi || ops.isEmpty { ops.insert(.info, at: 0) }
+        ops.append(multi ? .batchRename : .rename)   // any kind of file or folder
         return ops
     }
 }
@@ -840,8 +845,17 @@ enum Editors {
             model.window = Windows.show("Organize — \(name)", size: NSSize(width: 860, height: 640), OrganizeView(model: model))
         case .info:
             openInfo([url])
+        case .rename:
+            Renamer.renameOne(url)
+        case .batchRename:
+            openBatchRename([url])
         default: break
         }
+    }
+
+    static func openBatchRename(_ urls: [URL]) {
+        let model = BatchRenameModel(urls: urls)
+        model.window = Windows.show("Batch Rename — \(urls.count) files", size: NSSize(width: 720, height: 560), BatchRenameView(model: model))
     }
 
     static func openInfo(_ urls: [URL]) {

@@ -56,7 +56,9 @@ final class Shelf: ObservableObject {
     private var panel: NSPanel!
     private var changeCountAtMouseDown = 0
     private var buttonDown = false
-    private var emptyDragCount = -1   // a drag pasteboard already found to hold no files
+    private var emptyDragCount = -1
+    /// Opened by a click (Elxplorer), not a drag: keep the mode it opened in; the next click picks or dismisses.
+    private var clickMode = false   // a drag pasteboard already found to hold no files
     private var hideTask: Task<Void, Never>?
     private var measureTask: Task<Void, Never>?
 
@@ -135,6 +137,7 @@ final class Shelf: ObservableObject {
     private func dragged(_ drag: NSPasteboard) {
         let flags = NSEvent.modifierFlags
         if panel.isVisible {
+            if clickMode { return }
             // Option can be pressed or released mid-drag to flip between formats and tools.
             let wanted: Mode = flags.contains(.option) ? .tools : .convert
             if wanted != mode { mode = wanted; hovered = nil }
@@ -165,10 +168,30 @@ final class Shelf: ObservableObject {
         }
     }
 
-    private func show() {
+    /// Opens the wheel at a point for files that aren't being dragged (Elxplorer's ⌥-right-click):
+    /// petals are then clicked instead of dropped on.
+    func showWheel(for urls: [URL], at point: NSPoint, tools: Bool) {
+        guard !urls.isEmpty else { return }
+        self.urls = urls
+        clickMode = true
+        mode = tools ? .tools : .convert
+        hovered = nil
+        showID += 1
+        measure(urls)
+        loadThumbnail(urls[0])
+        show(at: point)
+    }
+
+    /// A click on the wheel (rather than a drop): run the petal under the pointer.
+    func click(_ index: Int?) {
+        guard let index, index < petals.count else { return }
+        perform(petals[index].action, urls: urls)
+    }
+
+    private func show(at point: NSPoint? = nil) {
         hideTask?.cancel()
         let size = Self.panelSize
-        let mouse = NSEvent.mouseLocation
+        let mouse = point ?? NSEvent.mouseLocation
         let screen = NSScreen.underPointer
         let visible = screen.visibleFrame
         // Centre the wheel (not the whole panel, which has a caption below) on the pointer.
@@ -182,6 +205,7 @@ final class Shelf: ObservableObject {
     }
 
     func hide() {
+        clickMode = false
         hideTask?.cancel()
         measureTask?.cancel()
         panel.orderOut(nil)
@@ -205,6 +229,8 @@ final class Shelf: ObservableObject {
             runConvert(format, urls)
         case .op(.info):
             Editors.openInfo(urls)
+        case .op(.batchRename):
+            Editors.openBatchRename(urls)
         case .op(.removeBackground) where urls.contains(where: { Kind.of($0) == .video }):
             guard let background = askVideoBackground() else { return }
             Task { await Ops.run(.removeBackground, urls, hud: JobHUD(title: "Removing background", total: urls.count), background: background) }
@@ -317,6 +343,18 @@ struct WheelView: View {
             }
             .frame(width: size, height: size)
             .modifier(DropTarget(enabled: glass, delegate: WheelDrop(shelf: shelf, size: size, inner: inner, outer: outer, count: petals.count)))
+            // Opened by a click (from Elxplorer), the petals are chosen by pointing and clicking.
+            .onContinuousHover { phase in
+                if case .active(let point) = phase {
+                    let i = WheelDrop(shelf: shelf, size: size, inner: inner, outer: outer, count: petals.count).index(at: point)
+                    if shelf.hovered != i { shelf.hovered = i }
+                } else if shelf.hovered != nil {
+                    shelf.hovered = nil
+                }
+            }
+            .onTapGesture(coordinateSpace: .local) { point in
+                shelf.click(WheelDrop(shelf: shelf, size: size, inner: inner, outer: outer, count: petals.count).index(at: point))
+            }
 
             Text(caption)
                 .font(.caption.weight(.semibold))

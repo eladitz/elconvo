@@ -56,6 +56,7 @@ Elconvo lives in the menu bar and offers to start at login, so the wheel is alwa
 - **Trim, Snapshot, Split** video and audio; **2× / ½ speed**, **Mute**, **Join**; audio **Normalize**, **Mono / Stereo**.
 - **PDF**: **Organize** pages (drag to reorder, rotate, delete), **Split**, **Rotate**, **Merge**.
 - **Metadata**: read everything (GPS location is flagged), edit title / author / copyright / description / keywords, or strip it all.
+- **Rename** and **Batch Rename**: rename one file, or many at once (replace text, add text, name + number, change case) with a live before → after preview.
 - **Size & Info**: true size of files and folders, largest first, plus MD5 / SHA-1 / SHA-256 / SHA-512 / CRC-32 checksums with a paste-to-verify box.
 
 Edits are always saved as a new file beside the original, never over it. The one exception is the metadata editor's **Save Changes**, which writes the new tags into the file itself.
@@ -106,6 +107,7 @@ Elconvo.app/Contents/MacOS/Elconvo --tool compress video.mov
 | `Sources/Studio.swift` | Size & Info, Adjust, Markup, PDF organizer, metadata editing, 3D |
 | `Sources/PDFWord.swift` | PDF → Word that keeps headings, lists and tables |
 | `Sources/VideoMatte.swift` | Video background removal |
+| `Sources/Rename.swift` | Rename and Batch Rename |
 | `Sources/Donate.swift` | The once-a-month "enjoying it?" note |
 
 ## Support

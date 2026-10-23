@@ -1437,6 +1437,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMainMenu()
+        // Development aid: `--snapshot-rename out.png files…` draws the Batch Rename window to an image and quits.
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--snapshot-rename"), args.count > i + 2 {
+            Editors.openBatchRename(args[(i + 2)...].map { URL(fileURLWithPath: $0) })
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                if let frame = NSApp.windows.first(where: { $0.isVisible && $0.title.hasPrefix("Batch") })?.contentView?.superview,
+                   let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) {
+                    frame.cacheDisplay(in: frame.bounds, to: rep)
+                    try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: args[i + 1]))
+                }
+                exit(0)
+            }
+            return
+        }
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Elconvo"
@@ -1453,6 +1467,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.servicesProvider = self
         NSUpdateDynamicServices()
         Shelf.shared.start()
+        listenForElxplorer()
         // Spawning ffmpeg to list its encoders takes a moment; do it now rather than inside the first OGG job.
         DispatchQueue.global(qos: .utility).async { _ = Tools.ffmpegEncoders }
         Donation.start()
@@ -1503,6 +1518,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func showMetadata(_ pboard: NSPasteboard, userData: String?, error: AutoreleasingUnsafeMutablePointer<NSString?>) {
         pboard.fileURLs.prefix(6).forEach { Editors.open(.metadata, $0) }
+    }
+
+    /// Requests from Elxplorer's right-click menu. They come over a distributed notification, which only apps
+    /// on this Mac can send (unlike a URL scheme, which any web page could trigger).
+    func listenForElxplorer() {
+        DistributedNotificationCenter.default().addObserver(forName: .init("com.itzkin.elconvo.command"), object: nil, queue: .main) { note in
+            MainActor.assumeIsolated {
+                guard let info = note.userInfo, let action = info["action"] as? String,
+                      let paths = info["files"] as? [String], !paths.isEmpty else { return }
+                let urls = paths.map { URL(fileURLWithPath: $0) }.filter { FileManager.default.fileExists(atPath: $0.path) }
+                guard !urls.isEmpty else { return }
+                let shelf = Shelf.shared
+                switch action {
+                case "wheel":
+                    let point = NSPoint(x: info["x"] as? Double ?? NSEvent.mouseLocation.x, y: info["y"] as? Double ?? NSEvent.mouseLocation.y)
+                    shelf.showWheel(for: urls, at: point, tools: (info["tools"] as? Bool) ?? false)
+                case "convert":
+                    let id = info["format"] as? String ?? ""
+                    if let format = id == "extract" ? Formats.extract : Formats.byID(id) { shelf.perform(.convert(format), urls: urls) }
+                case "tool":
+                    if let op = Op(rawValue: info["op"] as? String ?? "") { shelf.perform(.op(op), urls: urls) }
+                default:
+                    Store.shared.add(urls)
+                    self.showMainWindow()
+                }
+            }
+        }
     }
 
     @objc func openWindow() { showMainWindow() }
@@ -1599,6 +1641,21 @@ enum Entry {
                     try? png.write(to: URL(fileURLWithPath: args[i + 1]))
                 }
             }
+            exit(0)
+        }
+        // For Elxplorer: which conversions and tools fit these files, as JSON.
+        if let i = args.firstIndex(of: "--list-actions"), args.count > i + 1 {
+            let urls = args[(i + 1)...].map { URL(fileURLWithPath: $0) }
+            let kinds = Set(urls.map(Kind.of))
+            let kind = kinds.count == 1 ? kinds.first : nil
+            var convert = (kind.map(Formats.conversions(for:)) ?? []).filter { Tools.has($0.needs) }
+            convert += Formats.archiving(for: kind ?? .unknown)
+            let tools = MainActor.assumeIsolated { Op.available(for: kind, count: urls.count) }
+            let json: [String: Any] = [
+                "convert": convert.map { ["id": $0.id, "label": $0.label] },
+                "tools": tools.map { ["id": $0.rawValue, "title": $0.title] },
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: json) { FileHandle.standardOutput.write(data) }
             exit(0)
         }
         if let i = args.firstIndex(of: "--tool") {
