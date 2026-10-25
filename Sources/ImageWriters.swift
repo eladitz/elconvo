@@ -51,6 +51,18 @@ enum ImageWriters {
         return data
     }
 
+    /// PAM (Netpbm RGBA), which the bundled cwebp reads without any image libraries.
+    static func pam(_ png: URL) throws -> Data {
+        guard let source = CGImageSourceCreateWithURL(png as CFURL, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { throw ConvertError("Couldn't read the image.") }
+        // Straight (not premultiplied) alpha, as PAM expects.
+        let rgba = pixels(image, UInt8.self, space: CGColorSpace(name: CGColorSpace.sRGB)!, bits: 8,
+                          info: CGImageAlphaInfo.last.rawValue)
+        var data = Data("P7\nWIDTH \(image.width)\nHEIGHT \(image.height)\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n".utf8)
+        data.append(contentsOf: rgba)
+        return data
+    }
+
     /// WBMP type 0: black and white, one bit a pixel, light pixels white.
     static func wbmp(_ image: CGImage) -> Data {
         let w = image.width, h = image.height

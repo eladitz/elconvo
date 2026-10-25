@@ -488,8 +488,11 @@ enum Converter {
                     </svg>
                     """.write(to: out, atomically: true, encoding: .utf8)
                 } else if format.id == "webp", let cwebp = Tools.cwebp, Tools.magick == nil {
-                    try runSync(cwebp, ["-quiet", "-q", "\(Int(options.quality.lossy * 100))", "-alpha_q", "100", "-metadata", "none",
-                                        png.path, "-o", out.path])
+                    try withTempFile(ext: "pam") { pam in
+                        try ImageWriters.pam(png).write(to: pam)
+                        try runSync(cwebp, ["-quiet", "-q", "\(Int(options.quality.lossy * 100))", "-alpha_q", "100", "-metadata", "none",
+                                            pam.path, "-o", out.path])
+                    }
                 } else if let magick = Tools.magick {
                     try runSync(magick, [png.path, "-quality", "\(Int(options.quality.lossy * 100))", out.path])
                 } else {

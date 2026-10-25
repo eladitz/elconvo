@@ -28,6 +28,8 @@ fetch "https://downloads.xiph.org/releases/opus/opus-$OPUS.tar.gz" "opus-$OPUS"
 fetch "https://downloads.xiph.org/releases/ogg/libogg-$OGG.tar.gz" "libogg-$OGG"
 fetch "https://downloads.xiph.org/releases/vorbis/libvorbis-$VORBIS.tar.gz" "libvorbis-$VORBIS"
 fetch "https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-$WEBP.tar.gz" "libwebp-$WEBP"
+# libvorbis 1.3.7 still passes an old linker flag on macOS that today's linker rejects.
+sed -i '' 's/-force_cpusubtype_ALL//g' "$SRC/libvorbis-$VORBIS/configure"
 
 for ARCH in arm64 x86_64; do
     PREFIX=$ROOT/build/$ARCH
