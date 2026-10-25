@@ -1,2 +1,6 @@
 build/
 .DS_Store
+vendor/src/
+vendor/build/
+vendor/bin/
+vendor/licenses/

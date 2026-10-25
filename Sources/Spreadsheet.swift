@@ -70,7 +70,10 @@ enum Spreadsheet {
         case "ods": return try readODS(url)
         default:
             // .xls and .numbers: Numbers opens them and hands back an .xlsx we can read.
-            let temp = FileManager.default.temporaryDirectory.appendingPathComponent("elconvo-\(UUID().uuidString).xlsx")
+            // Numbers is sandboxed too and can't write into Elconvo's private folder, so in the App Store build
+            // it exports beside the original (hidden, and removed again).
+            let folder = Distribution.appStore ? url.deletingLastPathComponent() : FileManager.default.temporaryDirectory
+            let temp = folder.appendingPathComponent(".elconvo-\(UUID().uuidString).xlsx")
             defer { try? FileManager.default.removeItem(at: temp) }
             try await viaNumbers(url, to: temp)
             return try readXLSX(temp)
@@ -91,7 +94,16 @@ enum Spreadsheet {
             close d saving no
         end tell
         """
-        try await Converter.run("/usr/bin/osascript", ["-e", script])
+        if Distribution.appStore {
+            // Sandboxed: no osascript; Elconvo asks Numbers itself (an Apple-events permission for Numbers only).
+            try await MainActor.run {
+                var error: NSDictionary?
+                NSAppleScript(source: script)?.executeAndReturnError(&error)
+                if let error { throw ConvertError("Numbers couldn't export this file (\(error[NSAppleScript.errorMessage] ?? "no reason given")).") }
+            }
+        } else {
+            try await Converter.run("/usr/bin/osascript", ["-e", script])
+        }
         guard FileManager.default.fileExists(atPath: xlsx.path) else { throw ConvertError("Numbers couldn't export this file.") }
     }
 

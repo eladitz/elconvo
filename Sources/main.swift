@@ -66,15 +66,32 @@ struct Format: Hashable, Identifiable {
     var menuLabel: String { label + (Tools.has(needs) ? "" : " — needs \(needs!.rawValue)") }
 }
 
-enum Tool: String { case magick = "ImageMagick", ffmpeg = "ffmpeg", dng = "Adobe DNG Converter" }
+enum Tool: String { case magick = "ImageMagick", ffmpeg = "ffmpeg", dng = "Adobe DNG Converter", webp = "a WebP encoder" }
+
+/// Built for the Mac App Store (`./build.sh appstore`): sandboxed, carrying its own ffmpeg and cwebp,
+/// and the Store does the updating. The download from GitHub is the full version as before.
+enum Distribution {
+    #if APPSTORE
+    static let appStore = true
+    #else
+    static let appStore = false
+    #endif
+}
 
 enum Tools {
     static func find(_ names: [String]) -> String? {
         names.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
-    static let magick = find(["/opt/homebrew/bin/magick", "/usr/local/bin/magick"])
-    static let ffmpeg = find(["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"])
-    static let dng = find(["/Applications/Adobe DNG Converter.app/Contents/MacOS/Adobe DNG Converter"])
+    /// A converter shipped inside the app (the App Store build carries ffmpeg and cwebp in Contents/Helpers).
+    static func bundled(_ name: String) -> String? {
+        find([Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/\(name)").path])
+    }
+    // Sandboxed, only what's inside the app can run; the download uses Homebrew's, if you have them.
+    static let magick = Distribution.appStore ? nil : find(["/opt/homebrew/bin/magick", "/usr/local/bin/magick"])
+    static let ffmpeg = bundled("ffmpeg") ?? (Distribution.appStore ? nil : find(["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"]))
+    static let cwebp = bundled("cwebp") ?? (Distribution.appStore ? nil : find(["/opt/homebrew/bin/cwebp", "/usr/local/bin/cwebp"]))
+    static let dngApp = URL(fileURLWithPath: "/Applications/Adobe DNG Converter.app")
+    static let dng = find([dngApp.appendingPathComponent("Contents/MacOS/Adobe DNG Converter").path])
 
     /// Names of the encoders this ffmpeg build has (read once).
     static let ffmpegEncoders: Set<String> = {
@@ -97,6 +114,7 @@ enum Tools {
         case .magick: return magick != nil
         case .ffmpeg: return ffmpeg != nil
         case .dng: return dng != nil
+        case .webp: return cwebp != nil || magick != nil
         }
     }
 }
@@ -107,7 +125,7 @@ enum Formats {
         .init(id: "png", ext: "png", label: "PNG"),
         .init(id: "heic", ext: "heic", label: "HEIC"),
         .init(id: "avif", ext: "avif", label: "AVIF"),
-        .init(id: "webp", ext: "webp", label: "WebP", needs: .magick),
+        .init(id: "webp", ext: "webp", label: "WebP", needs: .webp),
         .init(id: "tiff", ext: "tiff", label: "TIFF"),
         .init(id: "gif", ext: "gif", label: "GIF"),
         .init(id: "bmp", ext: "bmp", label: "BMP"),
@@ -115,9 +133,9 @@ enum Formats {
         .init(id: "psd", ext: "psd", label: "Photoshop"),
         .init(id: "tga", ext: "tga", label: "TGA"),
         .init(id: "exr", ext: "exr", label: "OpenEXR (HDR)"),
-        .init(id: "hdr", ext: "hdr", label: "Radiance HDR", needs: .magick),
-        .init(id: "eps", ext: "eps", label: "EPS", needs: .magick),
-        .init(id: "wbmp", ext: "wbmp", label: "WBMP", needs: .magick),
+        .init(id: "hdr", ext: "hdr", label: "Radiance HDR", needs: Distribution.appStore ? nil : .magick),
+        .init(id: "eps", ext: "eps", label: "EPS", needs: Distribution.appStore ? nil : .magick),
+        .init(id: "wbmp", ext: "wbmp", label: "WBMP", needs: Distribution.appStore ? nil : .magick),
         .init(id: "svg", ext: "svg", label: "SVG (embedded image)"),
         .init(id: "ico", ext: "ico", label: "Icon (ICO)"),
         .init(id: "icns", ext: "icns", label: "Icon (ICNS)"),
@@ -289,6 +307,7 @@ enum Quality: String, CaseIterable, Identifiable {
     var lossy: Double { [.small: 0.55, .balanced: 0.75, .high: 0.88, .maximum: 1.0][self]! }
     var audioBitrate: Int { [.small: 96_000, .balanced: 160_000, .high: 256_000, .maximum: 320_000][self]! }
     var ffmpegCRF: String { [.small: "32", .balanced: "26", .high: "21", .maximum: "17"][self]! }
+    var videoToolboxQuality: String { [.small: "45", .balanced: "58", .high: "68", .maximum: "80"][self]! }
 }
 
 struct Options {
@@ -468,8 +487,13 @@ enum Converter {
                     <image width="\(w)" height="\(h)" xlink:href="data:image/png;base64,\(data.base64EncodedString())"/>
                     </svg>
                     """.write(to: out, atomically: true, encoding: .utf8)
+                } else if format.id == "webp", let cwebp = Tools.cwebp, Tools.magick == nil {
+                    try runSync(cwebp, ["-quiet", "-q", "\(Int(options.quality.lossy * 100))", "-alpha_q", "100", "-metadata", "none",
+                                        png.path, "-o", out.path])
+                } else if let magick = Tools.magick {
+                    try runSync(magick, [png.path, "-quality", "\(Int(options.quality.lossy * 100))", out.path])
                 } else {
-                    try runSync(Tools.magick!, [png.path, "-quality", "\(Int(options.quality.lossy * 100))", out.path])
+                    try ImageWriters.write(png, as: format.id, to: out)   // HDR, EPS, WBMP without ImageMagick
                 }
             }
             return
@@ -541,8 +565,18 @@ enum Converter {
     static func rawToDNG(_ input: URL, out: URL) async throws -> URL {
         if input.pathExtension.lowercased() == "dng" { throw ConvertError("This file is already a DNG.") }
         // -c lossless compression, -p1 medium preview; the converter names the file itself.
-        try await run(Tools.dng!, ["-c", "-p1", "-d", out.deletingLastPathComponent().path,
-                                   "-o", out.lastPathComponent, input.path])
+        let args = ["-c", "-p1", "-d", out.deletingLastPathComponent().path, "-o", out.lastPathComponent, input.path]
+        if Distribution.appStore {
+            // A sandboxed app can't run another app's program directly, but it can open the app with arguments.
+            let config = NSWorkspace.OpenConfiguration()
+            config.arguments = args
+            config.activates = false
+            config.createsNewApplicationInstance = true
+            let app = try await NSWorkspace.shared.openApplication(at: Tools.dngApp, configuration: config)
+            while !app.isTerminated { try await Task.sleep(for: .milliseconds(300)) }
+        } else {
+            try await run(Tools.dng!, args)
+        }
         guard FileManager.default.fileExists(atPath: out.path) else {
             throw ConvertError("Adobe DNG Converter didn't produce a file (is the camera supported by your version?).")
         }
@@ -627,13 +661,25 @@ enum Converter {
         case "webm": args += ["-c:v", "libvpx-vp9", "-crf", options.quality.ffmpegCRF, "-b:v", "0", "-c:a", "libopus"]
         case "wmv": args += ["-c:v", "wmv2", "-b:v", "4M", "-c:a", "wmav2", "-b:a", "192k"]
         case "mpg": args += ["-c:v", "mpeg2video", "-q:v", "3", "-c:a", "mp2", "-b:a", "192k"]
-        case "3gp", "3g2": args += ["-c:v", "libx264", "-profile:v", "baseline", "-crf", options.quality.ffmpegCRF,
-                                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac", "1", "-ar", "22050", "-b:a", "64k"]
-        case "mov-hevc": args += ["-c:v", "libx265", "-crf", options.quality.ffmpegCRF, "-tag:v", "hvc1", "-c:a", "aac"]
-        default: args += ["-c:v", "libx264", "-crf", options.quality.ffmpegCRF, "-pix_fmt", "yuv420p", "-c:a", "aac"]
+        case "3gp", "3g2": args += h264(options.quality) + ["-profile:v", "baseline", "-pix_fmt", "yuv420p",
+                                                            "-c:a", "aac", "-ac", "1", "-ar", "22050", "-b:a", "64k"]
+        case "mov-hevc": args += hevc(options.quality) + ["-tag:v", "hvc1", "-c:a", "aac"]
+        default: args += h264(options.quality) + ["-pix_fmt", "yuv420p", "-c:a", "aac"]
         }
         if ["mp4", "mov", "m4v", "mov-hevc"].contains(formatID) { args += ["-movflags", "+faststart"] }
         try await ffmpeg(input, out: out, args + metadataArgs(options))
+    }
+
+    /// x264 when this ffmpeg has it; otherwise the Mac's own hardware encoder (the App Store's ffmpeg is an
+    /// LGPL build, and x264/x265 are GPL). VideoToolbox's quality scale runs the other way from CRF.
+    static func h264(_ quality: Quality) -> [String] {
+        Tools.ffmpegEncoders.contains("libx264") ? ["-c:v", "libx264", "-crf", quality.ffmpegCRF]
+            : ["-c:v", "h264_videotoolbox", "-q:v", quality.videoToolboxQuality, "-allow_sw", "1"]
+    }
+
+    static func hevc(_ quality: Quality) -> [String] {
+        Tools.ffmpegEncoders.contains("libx265") ? ["-c:v", "libx265", "-crf", quality.ffmpegCRF]
+            : ["-c:v", "hevc_videotoolbox", "-q:v", quality.videoToolboxQuality, "-allow_sw", "1"]
     }
 
     static func videoToAudio(_ input: URL, to out: URL, formatID: String, options: Options) async throws {
@@ -1482,9 +1528,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Spawning ffmpeg to list its encoders takes a moment; do it now rather than inside the first OGG job.
         DispatchQueue.global(qos: .utility).async { _ = Tools.ffmpegEncoders }
         Donation.start()
-        Updater.start()
+        #if APPSTORE
+        DiskAccess.restore()
+        if DiskAccess.needed { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { DiskAccess.ask(first: true) } }
+        #else
+        Updater.start()   // the App Store does the updating there
+        #endif
         offerLoginItemOnce()
-        FullDiskAccess.offerIfNeeded()
+        if !Distribution.appStore { FullDiskAccess.offerIfNeeded() }
         // No window on launch: everything happens from the drag wheel.
         JobHUD.notice("Elconvo is running",
                       "Hold ⇧ while dragging a file to convert it. Hold ⌥⇧ for tools.\nThe full window is in the menu bar.")
@@ -1561,7 +1612,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openWindow() { showMainWindow() }
-    @objc func grantAccess() { FullDiskAccess.ask(fromMenu: true) }
+    @objc func grantAccess() {
+        if Distribution.appStore { DiskAccess.ask(URL(fileURLWithPath: "/Volumes")) } else { FullDiskAccess.ask(fromMenu: true) }
+    }
     @objc func donate() { NSWorkspace.shared.open(Donation.page) }
     @objc func checkForUpdates() { Task { await Updater.check(manual: true) } }
     @objc func website() { NSWorkspace.shared.open(URL(string: "https://ai.itzkin.com/elconvo.html")!) }
@@ -1620,13 +1673,17 @@ extension AppDelegate: NSMenuDelegate {
         shelf.state = Shelf.shared.enabled ? .on : .off
         let login = menu.addItem(withTitle: "Open at Login", action: #selector(toggleLogin), keyEquivalent: "")
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        let access = menu.addItem(withTitle: FullDiskAccess.isGranted ? "Full Disk Access: On" : "Grant Full Disk Access…",
-                                  action: #selector(grantAccess), keyEquivalent: "")
-        access.state = FullDiskAccess.isGranted ? .on : .off
+        if Distribution.appStore {
+            menu.addItem(withTitle: "Allow Access to Another Drive…", action: #selector(grantAccess), keyEquivalent: "")
+        } else {
+            let access = menu.addItem(withTitle: FullDiskAccess.isGranted ? "Full Disk Access: On" : "Grant Full Disk Access…",
+                                      action: #selector(grantAccess), keyEquivalent: "")
+            access.state = FullDiskAccess.isGranted ? .on : .off
+        }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Support Elconvo on Ko-fi…", action: #selector(donate), keyEquivalent: "")
         menu.addItem(withTitle: "Elconvo Website", action: #selector(website), keyEquivalent: "")
-        menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "")
+        if !Distribution.appStore { menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "") }
         menu.addItem(withTitle: "Quit Elconvo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
     }
 }

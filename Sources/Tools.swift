@@ -432,7 +432,8 @@ enum Ops {
                 let video = Int(totalKbps - audio)
                 guard video >= 80 else { throw ConvertError("\(mb) is too small for a \(Int(seconds))-second video.") }
                 let out = sibling(url, "fit", ext: "mp4")
-                try await Converter.ffmpeg(url, out: out, ["-c:v", "libx264", "-b:v", "\(video)k", "-maxrate", "\(video)k",
+                let encoder = Tools.ffmpegEncoders.contains("libx264") ? "libx264" : "h264_videotoolbox"
+                try await Converter.ffmpeg(url, out: out, ["-c:v", encoder, "-b:v", "\(video)k", "-maxrate", "\(video)k",
                                                           "-bufsize", "\(video * 2)k", "-pix_fmt", "yuv420p",
                                                           "-c:a", "aac", "-b:a", "\(Int(audio))k", "-movflags", "+faststart"])
                 return out
