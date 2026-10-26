@@ -13,7 +13,8 @@ enum PetalAction { case convert(Format), op(Op), copy, more }
 
 extension NSScreen {
     static var underPointer: NSScreen {
-        screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? main!
+        if let touring = Tour.active { return touring }   // a tour keeps everything on the recorded display
+        return screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? main!
     }
 }
 
@@ -192,7 +193,8 @@ final class Shelf: ObservableObject {
         hideTask?.cancel()
         let size = Self.panelSize
         let mouse = point ?? NSEvent.mouseLocation
-        let screen = NSScreen.underPointer
+        // The screen of the point it opens at (which isn't always the pointer's, e.g. when opened from code).
+        let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.underPointer
         let visible = screen.visibleFrame
         // Centre the wheel (not the whole panel, which has a caption below) on the pointer.
         let wheelCentreFromTop = 10 + Self.diameter / 2

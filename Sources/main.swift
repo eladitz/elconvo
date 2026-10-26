@@ -1499,6 +1499,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMainMenu()
         // Development aid: `--snapshot-rename out.png files…` draws the Batch Rename window to an image and quits.
         let args = CommandLine.arguments
+        // `--tour <folder>`: the self-running walkthrough for App Review's screen recording (Tour.swift).
+        let touring = args.firstIndex(of: "--tour").flatMap { $0 + 1 < args.count ? URL(fileURLWithPath: args[$0 + 1]) : nil }
+        if let touring { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { Tour.run(touring) } }
         if let i = args.firstIndex(of: "--snapshot-rename"), args.count > i + 2 {
             Editors.openBatchRename(args[(i + 2)...].map { URL(fileURLWithPath: $0) })
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
@@ -1538,7 +1541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Updater.start()   // the App Store does the updating there
         #endif
         offerLoginItemOnce()
-        if !Distribution.appStore { FullDiskAccess.offerIfNeeded() }
+        if !Distribution.appStore && touring == nil { FullDiskAccess.offerIfNeeded() }
         // No window on launch: everything happens from the drag wheel.
         JobHUD.notice("Elconvo is running",
                       "Hold ⇧ while dragging a file to convert it. Hold ⌥⇧ for tools.\nThe full window is in the menu bar.")
