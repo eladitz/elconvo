@@ -1687,7 +1687,7 @@ extension AppDelegate: NSMenuDelegate {
             access.state = FullDiskAccess.isGranted ? .on : .off
         }
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Support Elconvo on Ko-fi…", action: #selector(donate), keyEquivalent: "")
+        if Donation.enabled { menu.addItem(withTitle: "Support Elconvo on Ko-fi…", action: #selector(donate), keyEquivalent: "") }
         menu.addItem(withTitle: "Elconvo Website", action: #selector(website), keyEquivalent: "")
         if !Distribution.appStore { menu.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: "") }
         menu.addItem(withTitle: "Quit Elconvo", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
